@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() => runApp(const App());
 
@@ -293,6 +294,143 @@ runcmd:
   - systemctl restart ssh
 ''';
 
+  static Future<void> run3x(Map s, String ip, String pass) async {
+    final user = 'u${randHex(3)}';
+    final pw = randPass(14);
+    final port = 20000 + _rnd.nextInt(30000);
+    final base = randPass(12);
+    log(s, 'تثبيت 3X-UI (قد ياخذ 1-4 دقائق)...');
+    final inst = r"""
+export DEBIAN_FRONTEND=noninteractive
+for i in 1 2 3; do
+  yes '' | timeout 900 bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) && break
+  sleep 10
+done
+test -x /usr/local/x-ui/x-ui
+""" +
+        'U=$user\nP=$pw\nPORT=$port\nBASE=$base\n' +
+        r"""
+/usr/local/x-ui/x-ui setting -username $U -password $P -port $PORT -webBasePath /$BASE
+systemctl restart x-ui
+sleep 4
+systemctl is-active x-ui
+if curl -sk -o /dev/null --max-time 5 https://127.0.0.1:$PORT/; then echo SCHEME=https; else echo SCHEME=http; fi
+""";
+    final o1 = await Ssh.run(ip, pass, 'cat > /tmp/job.sh && bash /tmp/job.sh; rc=\$?; rm -f /tmp/job.sh; exit \$rc', input: inst);
+    final scheme = o1.contains('SCHEME=https') ? 'https' : 'http';
+    s['panel'] = {
+      'url': '$scheme://$ip:$port/$base/',
+      'user': user,
+      'pass': pw,
+    };
+    await Store.save();
+    log(s, 'توليد المفاتيح...');
+    final out = await Ssh.run(
+        ip,
+        pass,
+        r"""XB=$(ls /usr/local/x-ui/bin/xray-linux-* | head -1)
+echo '===X25519==='; $XB x25519
+echo '===VLESSENC==='; $XB vlessenc""");
+    final k = Xray.parse(out);
+    final x = <String, dynamic>{
+      'port': 443,
+      'sni': 'telegram.org',
+      'target': 'core.telegram.org:443',
+      'prv': k['prv'],
+      'pbk': k['pbk'],
+      'dec': k['dec'],
+      'enc': k['enc'],
+      'sids': [randHex(6), randHex(4), randHex(8)],
+      'spx': '/${randHex(8)}',
+    };
+    final first = {
+      'id': uuid4(),
+      'email': 'user1',
+      'created': DateTime.now().millisecondsSinceEpoch
+    };
+    final settings = {
+      'clients': [
+        {
+          'id': first['id'],
+          'flow': '',
+          'email': 'user1',
+          'limitIp': 0,
+          'totalGB': 0,
+          'expiryTime': 0,
+          'enable': true,
+          'tgId': '',
+          'subId': randHex(8),
+          'comment': '',
+          'reset': 0
+        }
+      ],
+      'decryption': x['dec'],
+      'encryption': x['enc'],
+      'fallbacks': [],
+    };
+    final stream = {
+      'network': 'tcp',
+      'security': 'reality',
+      'externalProxy': [],
+      'realitySettings': {
+        'show': false,
+        'xver': 0,
+        'target': x['target'],
+        'serverNames': [x['sni']],
+        'privateKey': x['prv'],
+        'minClientVer': '',
+        'maxClientVer': '',
+        'maxTimediff': 0,
+        'shortIds': x['sids'],
+        'mldsa65Seed': '',
+        'settings': {
+          'publicKey': x['pbk'],
+          'fingerprint': 'chrome',
+          'serverName': '',
+          'spiderX': x['spx'],
+          'mldsa65Verify': ''
+        }
+      },
+      'tcpSettings': {
+        'acceptProxyProtocol': false,
+        'header': {'type': 'none'}
+      }
+    };
+    final sniff = {
+      'enabled': true,
+      'destOverride': ['http', 'tls', 'quic'],
+      'metadataOnly': false,
+      'routeOnly': false
+    };
+    final add = 'U=$user\nP=$pw\nPORT=$port\nBASE=$base\nSCHEME=$scheme\n'
+            "cat > /tmp/s.json <<'JEOF'\n${jsonEncode(settings)}\nJEOF\n"
+            "cat > /tmp/ss.json <<'JEOF'\n${jsonEncode(stream)}\nJEOF\n"
+            "cat > /tmp/sn.json <<'JEOF'\n${jsonEncode(sniff)}\nJEOF\n" +
+        r"""
+B=$SCHEME://127.0.0.1:$PORT/$BASE
+curl -sk -c /tmp/cj.txt -d "username=$U" -d "password=$P" $B/login >/dev/null
+curl -sk -b /tmp/cj.txt $B/panel/api/inbounds/add \
+  --data-urlencode "settings@/tmp/s.json" \
+  --data-urlencode "streamSettings@/tmp/ss.json" \
+  --data-urlencode "sniffing@/tmp/sn.json" \
+  -d remark=vless-reality -d enable=true -d listen= -d port=443 -d protocol=vless \
+  -d up=0 -d down=0 -d total=0 -d expiryTime=0
+echo
+rm -f /tmp/s.json /tmp/ss.json /tmp/sn.json /tmp/cj.txt
+sleep 12
+""";
+    final r = await Ssh.run(ip, pass, 'cat > /tmp/job.sh && bash /tmp/job.sh; rc=\$?; rm -f /tmp/job.sh; exit \$rc', input: add);
+    s['xray'] = x;
+    s['clients'] = [first];
+    if (r.contains('"success":true')) {
+      log(s, 'تم إنشاء الوارد داخل اللوحة');
+    } else {
+      log(s, 'تنبيه: ما انضاف الوارد تلقائياً، أنشئه من اللوحة. ${r.trim()}');
+      s['clients'] = <dynamic>[];
+      s.remove('xray');
+    }
+  }
+
   static Future<void> run(String id) async {
     if (running.contains(id)) return;
     final s = Store.servers[id];
@@ -323,29 +461,33 @@ runcmd:
         }
       }
       if (!up) throw Exception('تعذر الاتصال بـ SSH');
-      log(s, 'تثبيت Xray وتوليد المفاتيح (قد ياخذ دقيقة)...');
-      final out = await Ssh.run(ip, pass, Xray.setup);
-      final k = Xray.parse(out);
-      final x = <String, dynamic>{
-        'port': 443,
-        'sni': 'telegram.org',
-        'target': 'core.telegram.org:443',
-        'prv': k['prv'],
-        'pbk': k['pbk'],
-        'dec': k['dec'],
-        'enc': k['enc'],
-        'sids': [randHex(6), randHex(4), randHex(8)],
-        'spx': '/${randHex(8)}',
-      };
-      final first = {
-        'id': uuid4(),
-        'email': 'user1',
-        'created': DateTime.now().millisecondsSinceEpoch
-      };
-      s['xray'] = x;
-      log(s, 'كتابة الإعدادات وتشغيل Xray...');
-      await Xray.apply(s, [first]);
-      s['clients'] = [first];
+      if (s['mode'] == '3xui') {
+        await run3x(s, ip, pass);
+      } else {
+        log(s, 'تثبيت Xray وتوليد المفاتيح (قد ياخذ دقيقة)...');
+        final out = await Ssh.run(ip, pass, Xray.setup);
+        final k = Xray.parse(out);
+        final x = <String, dynamic>{
+          'port': 443,
+          'sni': 'telegram.org',
+          'target': 'core.telegram.org:443',
+          'prv': k['prv'],
+          'pbk': k['pbk'],
+          'dec': k['dec'],
+          'enc': k['enc'],
+          'sids': [randHex(6), randHex(4), randHex(8)],
+          'spx': '/${randHex(8)}',
+        };
+        final first = {
+          'id': uuid4(),
+          'email': 'user1',
+          'created': DateTime.now().millisecondsSinceEpoch
+        };
+        s['xray'] = x;
+        log(s, 'كتابة الإعدادات وتشغيل Xray...');
+        await Xray.apply(s, [first]);
+        s['clients'] = [first];
+      }
       s['status'] = 'ready';
       log(s, 'جاهز ✔');
     } catch (e) {
@@ -527,6 +669,14 @@ class _HomeState extends State<Home> {
               textDirection: TextDirection.ltr,
               style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
           if (pings[id] != null) Text(pings[id]!),
+          if (ready && local!['panel'] != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: SelectableText(
+                  'اللوحة: ${local['panel']['url']}\nاليوزر: ${local['panel']['user']}   الباسورد: ${local['panel']['pass']}',
+                  textDirection: TextDirection.ltr,
+                  style: const TextStyle(fontSize: 12)),
+            ),
           if (!ready && logs.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6),
@@ -536,7 +686,7 @@ class _HomeState extends State<Home> {
             ),
           const SizedBox(height: 8),
           Wrap(spacing: 8, runSpacing: 4, children: [
-            if (ready)
+            if (ready && (local!['clients'] as List).isNotEmpty)
               FilledButton(
                   onPressed: () async {
                     await Navigator.push(
@@ -546,6 +696,16 @@ class _HomeState extends State<Home> {
                     if (mounted) setState(() {});
                   },
                   child: const Text('المستخدمون')),
+            if (ready && local!['panel'] != null)
+              FilledButton(
+                  onPressed: () => launchUrl(
+                      Uri.parse('${local['panel']['url']}'),
+                      mode: LaunchMode.externalApplication),
+                  child: const Text('فتح اللوحة')),
+            if (ready && local!['panel'] != null)
+              OutlinedButton(
+                  onPressed: () => copy('${local['panel']['pass']}'),
+                  child: const Text('نسخ باسورد اللوحة')),
             if (st == 'error')
               FilledButton(
                   onPressed: () {
@@ -676,6 +836,7 @@ class _ClientsPageState extends State<ClientsPage> {
   bool busy = false;
   Map<String, dynamic> get s => Store.servers[widget.id]!;
   List get clients => s['clients'] as List;
+  bool get panelMode => s['mode'] == '3xui';
 
   Future<void> add() async {
     final n = name.text.trim();
@@ -776,18 +937,25 @@ class _ClientsPageState extends State<ClientsPage> {
                         OutlinedButton(
                             onPressed: () => showQr(l),
                             child: const Text('QR')),
-                        FilledButton.tonal(
-                            style: FilledButton.styleFrom(
-                                foregroundColor: Colors.redAccent),
-                            onPressed: busy
-                                ? null
-                                : () => remove(Map<String, dynamic>.from(c)),
-                            child: const Text('حذف')),
+                        if (!panelMode)
+                          FilledButton.tonal(
+                              style: FilledButton.styleFrom(
+                                  foregroundColor: Colors.redAccent),
+                              onPressed: busy
+                                  ? null
+                                  : () => remove(Map<String, dynamic>.from(c)),
+                              child: const Text('حذف')),
                       ]),
                     ]),
               ),
             );
           }),
+          if (panelMode)
+            const Padding(
+                padding: EdgeInsets.all(8),
+                child: Text('باقي المستخدمين وإعدادات الوارد تُدار من لوحة 3X-UI بالمتصفح.',
+                    style: TextStyle(color: Colors.grey))),
+          if (!panelMode) ...[
           const SizedBox(height: 8),
           TextField(
               controller: name,
@@ -798,6 +966,7 @@ class _ClientsPageState extends State<ClientsPage> {
           const SizedBox(height: 8),
           FilledButton(
               onPressed: busy ? null : add, child: const Text('إضافة مستخدم')),
+          ],
         ]),
       ),
     );
@@ -832,6 +1001,7 @@ class _CreateTabState extends State<CreateTab> {
 
   String region = 'fra1';
   String size = 's-1vcpu-512mb-10gb';
+  String mode = '3xui';
   final name = TextEditingController();
   Map<String, int?> res = {};
   bool testing = false;
@@ -891,6 +1061,7 @@ class _CreateTabState extends State<CreateTab> {
         'size': size,
         'ip': null,
         'pass': pass,
+        'mode': mode,
         'status': 'creating',
         'log': <String>[],
       };
@@ -952,6 +1123,18 @@ class _CreateTabState extends State<CreateTab> {
         onChanged: (v) => setState(() => size = v!),
       ),
       const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        value: mode,
+        decoration: const InputDecoration(
+            border: OutlineInputBorder(), labelText: 'نوع التجهيز'),
+        items: const [
+          DropdownMenuItem(
+              value: '3xui', child: Text('3X-UI (لوحة بالمتصفح + VLESS جاهز)')),
+          DropdownMenuItem(value: 'xray', child: Text('Xray مباشر (من التطبيق)')),
+        ],
+        onChanged: (v) => setState(() => mode = v!),
+      ),
+      const SizedBox(height: 12),
       TextField(
           controller: name,
           textDirection: TextDirection.ltr,
@@ -963,7 +1146,7 @@ class _CreateTabState extends State<CreateTab> {
           child: Text(busy ? 'جاري الإنشاء...' : 'إنشاء السيرفر')),
       const SizedBox(height: 8),
       const Text(
-          'بعد الإنشاء التطبيق يدخل السيرفر بـSSH، يثبّت Xray، يولّد المفاتيح ويعطيك أول رابط خلال 2-4 دقائق.',
+          'بعد الإنشاء التطبيق يدخل السيرفر بـSSH ويجهّزه تلقائياً. بوضع 3X-UI تحصل رابط اللوحة ويوزرها وباسوردها ورابط VLESS جاهز خلال 3-6 دقائق.',
           style: TextStyle(color: Colors.grey, fontSize: 13)),
       if (msg != null)
         Padding(
