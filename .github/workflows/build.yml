@@ -12,9 +12,22 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+          cache: gradle
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
+      - name: Speed up Gradle (skip lint, parallel)
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/skip-lint.gradle <<'GRADLE'
+          allprojects {
+            tasks.configureEach { t ->
+              if (t.name.startsWith('lint')) { t.enabled = false }
+            }
+          }
+          GRADLE
+          printf 'org.gradle.parallel=true\norg.gradle.caching=true\norg.gradle.daemon=false\nandroid.enableR8.fullMode=false\n' >> ~/.gradle/gradle.properties
       - name: Create Flutter project
         run: flutter create --org com.sultan --project-name server_admin --platforms android app
       - name: Apply sources
@@ -30,7 +43,7 @@ jobs:
         run: |
           cd app
           flutter pub get
-          flutter build apk --release
+          flutter build apk --release --target-platform android-arm64 --no-tree-shake-icons
       - uses: actions/upload-artifact@v4
         with:
           name: ServerAdmin-apk
