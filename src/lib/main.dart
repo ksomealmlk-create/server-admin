@@ -1291,9 +1291,9 @@ class Panels {
   }
 
   static Future<List<Cookie>> login(String base, String user, String pass) async {
-    final c = HttpClient()
-      ..badCertificateCallback = (cert, host, port) => true
-      ..connectionTimeout = const Duration(seconds: 10);
+    final c = HttpClient();
+    c.connectionTimeout = const Duration(seconds: 10);
+    c.badCertificateCallback = (cert, host, port) => true;
     try {
       final req = await c.postUrl(Uri.parse('${base}login'));
       req.headers.contentType =
