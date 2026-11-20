@@ -12,11 +12,17 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-          cache: gradle
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('src/pubspec.yaml') }}
+          restore-keys: gradle-
       - name: Speed up Gradle (skip lint, parallel)
         run: |
           mkdir -p ~/.gradle/init.d
