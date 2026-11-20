@@ -1,8 +1,0 @@
-{
-  "appId": "com.sultan.serveradmin",
-  "appName": "إدارة السيرفرات",
-  "webDir": "www",
-  "plugins": {
-    "CapacitorHttp": { "enabled": true }
-  }
-}
