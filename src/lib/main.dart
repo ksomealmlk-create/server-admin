@@ -8,7 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 void main() => runApp(const App());
 
@@ -125,11 +125,24 @@ String uuid4() {
 // Per-server info kept on the phone: root password, xray keys, clients, log.
 class Store {
   static Map<String, Map<String, dynamic>> servers = {};
+  static List<Map<String, dynamic>> panels = [];
+
+  static void addPanel(String name, String url, String user, String pass) {
+    if (panels.any((p) => p['url'] == url)) return;
+    panels.add({'name': name, 'url': url, 'user': user, 'pass': pass});
+  }
 
   static Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     final raw = p.getString('servers');
     servers = {};
+    panels = [];
+    final rp = p.getString('panels');
+    if (rp != null) {
+      panels = (jsonDecode(rp) as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
     if (raw != null) {
       final m = jsonDecode(raw) as Map<String, dynamic>;
       m.forEach((k, v) => servers[k] = Map<String, dynamic>.from(v as Map));
@@ -139,6 +152,7 @@ class Store {
   static Future<void> save() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('servers', jsonEncode(servers));
+    await p.setString('panels', jsonEncode(panels));
   }
 }
 
@@ -489,6 +503,10 @@ sleep 12
         s['clients'] = [first];
       }
       s['status'] = 'ready';
+      if (s['mode'] == '3xui' && s['panel'] != null) {
+        Store.addPanel('${s['name']}', '${s['panel']['url']}',
+            '${s['panel']['user']}', '${s['panel']['pass']}');
+      }
       log(s, 'جاهز ✔');
     } catch (e) {
       s['status'] = 'error';
@@ -540,11 +558,8 @@ class _HomeState extends State<Home> {
     final p = await SharedPreferences.getInstance();
     DO.token = p.getString('token') ?? '';
     await Store.load();
-    if (DO.token.isEmpty) {
-      setState(() => tab = 2);
-    } else {
-      await refresh();
-    }
+    if (mounted) setState(() {});
+    if (DO.token.isNotEmpty) await refresh();
   }
 
   Future<void> refresh() async {
@@ -581,7 +596,7 @@ class _HomeState extends State<Home> {
     await p.setString('token', v);
     DO.token = v;
     tokenCtl.clear();
-    setState(() => tab = 0);
+    setState(() => tab = 1);
     await refresh();
   }
 
@@ -698,9 +713,15 @@ class _HomeState extends State<Home> {
                   child: const Text('المستخدمون')),
             if (ready && local!['panel'] != null)
               FilledButton(
-                  onPressed: () => launchUrl(
-                      Uri.parse('${local['panel']['url']}'),
-                      mode: LaunchMode.externalApplication),
+                  onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => PanelPage(panel: {
+                                'name': '${d['name']}',
+                                'url': '${local['panel']['url']}',
+                                'user': '${local['panel']['user']}',
+                                'pass': '${local['panel']['pass']}',
+                              }))),
                   child: const Text('فتح اللوحة')),
             if (ready && local!['panel'] != null)
               OutlinedButton(
@@ -737,6 +758,104 @@ class _HomeState extends State<Home> {
         ]),
       ),
     );
+  }
+
+  Future<void> addPanel() async {
+    final n = TextEditingController();
+    final u = TextEditingController();
+    final us = TextEditingController();
+    final pw = TextEditingController();
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (x) => AlertDialog(
+              title: const Text('إضافة لوحة 3X-UI'),
+              content: SingleChildScrollView(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  TextField(
+                      controller: n,
+                      decoration: const InputDecoration(labelText: 'الاسم')),
+                  TextField(
+                      controller: u,
+                      textDirection: TextDirection.ltr,
+                      decoration: const InputDecoration(
+                          labelText: 'رابط اللوحة الكامل',
+                          hintText: 'http://IP:PORT/PATH/')),
+                  TextField(
+                      controller: us,
+                      textDirection: TextDirection.ltr,
+                      decoration: const InputDecoration(labelText: 'اليوزر')),
+                  TextField(
+                      controller: pw,
+                      obscureText: true,
+                      textDirection: TextDirection.ltr,
+                      decoration: const InputDecoration(labelText: 'الباسورد')),
+                ]),
+              ),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(x, false),
+                    child: const Text('إلغاء')),
+                TextButton(
+                    onPressed: () => Navigator.pop(x, true),
+                    child: const Text('حفظ')),
+              ],
+            ));
+    if (ok != true) return;
+    if (u.text.trim().isEmpty || us.text.trim().isEmpty || pw.text.isEmpty) {
+      if (mounted) snack(context, 'عبّي الرابط واليوزر والباسورد');
+      return;
+    }
+    final url = Panels.norm(u.text);
+    Store.panels.add({
+      'name': n.text.trim().isEmpty ? url : n.text.trim(),
+      'url': url,
+      'user': us.text.trim(),
+      'pass': pw.text,
+    });
+    await Store.save();
+    if (mounted) setState(() {});
+  }
+
+  Widget panelsTab() {
+    return ListView(padding: const EdgeInsets.all(12), children: [
+      FilledButton.icon(
+          onPressed: addPanel,
+          icon: const Icon(Icons.add),
+          label: const Text('إضافة لوحة 3X-UI')),
+      const SizedBox(height: 8),
+      if (Store.panels.isEmpty)
+        const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(
+                child: Text('ما كو لوحات. أضف رابط لوحتك أو أنشئ سيرفر جديد',
+                    textAlign: TextAlign.center))),
+      ...Store.panels.asMap().entries.map((e) {
+        final pn = e.value;
+        return Card(
+          child: ListTile(
+            leading: const Icon(Icons.dashboard),
+            title: Text('${pn['name']}'),
+            subtitle: Text('${pn['url']}',
+                textDirection: TextDirection.ltr,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+            onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => PanelPage(panel: Map<String, dynamic>.from(pn)))),
+            trailing: IconButton(
+                icon: const Icon(Icons.delete_outline),
+                onPressed: () async {
+                  if (await confirm(context, 'حذف اللوحة من التطبيق؟')) {
+                    Store.panels.removeAt(e.key);
+                    await Store.save();
+                    if (mounted) setState(() {});
+                  }
+                }),
+          ),
+        );
+      }),
+    ]);
   }
 
   Widget serversTab() {
@@ -789,12 +908,13 @@ class _HomeState extends State<Home> {
   @override
   Widget build(BuildContext context) {
     final pages = [
+      panelsTab(),
       serversTab(),
       CreateTab(
           keys: keys,
           onCreated: () async {
             await refresh();
-            if (mounted) setState(() => tab = 0);
+            if (mounted) setState(() => tab = 1);
           }),
       settingsTab(),
     ];
@@ -814,6 +934,7 @@ class _HomeState extends State<Home> {
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() => tab = i),
         destinations: const [
+          NavigationDestination(icon: Icon(Icons.dashboard), label: 'اللوحات'),
           NavigationDestination(icon: Icon(Icons.dns), label: 'السيرفرات'),
           NavigationDestination(icon: Icon(Icons.add_circle), label: 'إنشاء'),
           NavigationDestination(icon: Icon(Icons.settings), label: 'الإعدادات'),
@@ -1155,5 +1276,119 @@ class _CreateTabState extends State<CreateTab> {
               style: TextStyle(color: ok ? Colors.greenAccent : Colors.redAccent)),
         ),
     ]);
+  }
+}
+
+
+// ---------------------------------------------------------------- 3X-UI panel (WebView)
+class Panels {
+  static String norm(String u) {
+    var s = u.trim();
+    if (!s.startsWith('http')) s = 'http://$s';
+    s = s.replaceFirst(RegExp(r'panel/?$'), '');
+    if (!s.endsWith('/')) s += '/';
+    return s;
+  }
+
+  static Future<List<Cookie>> login(String base, String user, String pass) async {
+    final c = HttpClient()
+      ..badCertificateCallback = (cert, host, port) => true
+      ..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final req = await c.postUrl(Uri.parse('${base}login'));
+      req.headers.contentType =
+          ContentType('application', 'x-www-form-urlencoded', charset: 'utf-8');
+      req.write(
+          'username=${Uri.encodeQueryComponent(user)}&password=${Uri.encodeQueryComponent(pass)}');
+      final res = await req.close();
+      final body = await utf8.decodeStream(res);
+      if (!body.contains('"success":true')) {
+        throw Exception('بيانات الدخول غير صحيحة أو اللوحة ما استجابت');
+      }
+      return res.cookies;
+    } finally {
+      c.close(force: true);
+    }
+  }
+}
+
+class PanelPage extends StatefulWidget {
+  final Map<String, dynamic> panel;
+  const PanelPage({super.key, required this.panel});
+  @override
+  State<PanelPage> createState() => _PanelPageState();
+}
+
+class _PanelPageState extends State<PanelPage> {
+  late final WebViewController c;
+  bool loading = true;
+  String? note;
+
+  @override
+  void initState() {
+    super.initState();
+    c = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(NavigationDelegate(
+        onPageFinished: (_) {
+          if (mounted) setState(() => loading = false);
+        },
+        onSslAuthError: (r) => r.proceed(),
+      ));
+    start();
+  }
+
+  Future<void> start() async {
+    final base = Panels.norm('${widget.panel['url']}');
+    final uri = Uri.parse(base);
+    try {
+      final cookies = await Panels.login(
+          base, '${widget.panel['user']}', '${widget.panel['pass']}');
+      for (final k in cookies) {
+        await WebViewCookieManager().setCookie(WebViewCookie(
+            name: k.name,
+            value: k.value,
+            domain: uri.host,
+            path: k.path ?? '/'));
+      }
+    } catch (e) {
+      note = DO.msg(e);
+    }
+    await c.loadRequest(Uri.parse('${base}panel/'));
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (await c.canGoBack()) {
+          c.goBack();
+        } else if (context.mounted) {
+          Navigator.pop(context);
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text('${widget.panel['name']}'),
+          actions: [
+            IconButton(onPressed: () => c.reload(), icon: const Icon(Icons.refresh)),
+          ],
+        ),
+        body: SafeArea(
+          child: Column(children: [
+            if (loading) const LinearProgressIndicator(),
+            if (note != null)
+              Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Text('تعذر الدخول التلقائي: $note',
+                      style: const TextStyle(color: Colors.orangeAccent))),
+            Expanded(child: WebViewWidget(controller: c)),
+          ]),
+        ),
+      ),
+    );
   }
 }
