@@ -1,2 +1,1 @@
-# Server Admin
-تطبيق لإدارة سيرفرات DigitalOcean. يبنى APK تلقائيًا عبر GitHub Actions (Actions -> Artifacts).
+Server Admin (Flutter). Build via GitHub Actions -> Artifacts.
