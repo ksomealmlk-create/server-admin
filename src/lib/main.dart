@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'native_panel.dart';
 
 void main() => runApp(const App());
 
@@ -765,6 +766,7 @@ class _HomeState extends State<Home> {
     final u = TextEditingController();
     final us = TextEditingController();
     final pw = TextEditingController();
+    final tk = TextEditingController();
     final ok = await showDialog<bool>(
         context: context,
         builder: (x) => AlertDialog(
@@ -789,6 +791,12 @@ class _HomeState extends State<Home> {
                       obscureText: true,
                       textDirection: TextDirection.ltr,
                       decoration: const InputDecoration(labelText: 'الباسورد')),
+                  TextField(
+                      controller: tk,
+                      obscureText: true,
+                      textDirection: TextDirection.ltr,
+                      decoration: const InputDecoration(
+                          labelText: 'توكن API (اختياري، للتحكم السريع)')),
                 ]),
               ),
               actions: [
@@ -811,7 +819,59 @@ class _HomeState extends State<Home> {
       'url': url,
       'user': us.text.trim(),
       'pass': pw.text,
+      'token': tk.text.trim(),
     });
+    await Store.save();
+    if (mounted) setState(() {});
+  }
+
+  void openWeb(Map pn) => Navigator.push(
+      context,
+      MaterialPageRoute(
+          builder: (_) => PanelPage(panel: Map<String, dynamic>.from(pn))));
+
+  void openPanel(Map pn) {
+    final tok = '${pn['token'] ?? ''}'.trim();
+    if (tok.isEmpty) {
+      openWeb(pn);
+      return;
+    }
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => NativePanelPage(
+                  panel: {
+                    'name': '${pn['name']}',
+                    'url': Panels.norm('${pn['url']}'),
+                    'token': tok,
+                  },
+                  openWeb: () => openWeb(pn),
+                )));
+  }
+
+  Future<void> setToken(int i) async {
+    final c = TextEditingController();
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (x) => AlertDialog(
+              title: const Text('توكن API'),
+              content: TextField(
+                  controller: c,
+                  obscureText: true,
+                  textDirection: TextDirection.ltr,
+                  decoration: const InputDecoration(
+                      hintText: 'الصق التوكن (فارغ = حذف التوكن)')),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(x, false),
+                    child: const Text('إلغاء')),
+                TextButton(
+                    onPressed: () => Navigator.pop(x, true),
+                    child: const Text('حفظ')),
+              ],
+            ));
+    if (ok != true) return;
+    Store.panels[i]['token'] = c.text.trim();
     await Store.save();
     if (mounted) setState(() {});
   }
@@ -835,23 +895,30 @@ class _HomeState extends State<Home> {
           child: ListTile(
             leading: const Icon(Icons.dashboard),
             title: Text('${pn['name']}'),
-            subtitle: Text('${pn['url']}',
+            subtitle: Text(
+                '${'${pn['token'] ?? ''}'.isNotEmpty ? 'تحكم سريع ✓  ' : ''}${pn['url']}',
                 textDirection: TextDirection.ltr,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis),
-            onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => PanelPage(panel: Map<String, dynamic>.from(pn)))),
-            trailing: IconButton(
-                icon: const Icon(Icons.delete_outline),
-                onPressed: () async {
+            onTap: () => openPanel(pn),
+            trailing: PopupMenuButton<String>(
+              onSelected: (v) async {
+                if (v == 'web') openWeb(pn);
+                if (v == 'token') await setToken(e.key);
+                if (v == 'del') {
                   if (await confirm(context, 'حذف اللوحة من التطبيق؟')) {
                     Store.panels.removeAt(e.key);
                     await Store.save();
                     if (mounted) setState(() {});
                   }
-                }),
+                }
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'web', child: Text('فتح لوحة 3X-UI الأصلية')),
+                PopupMenuItem(value: 'token', child: Text('تغيير توكن API')),
+                PopupMenuItem(value: 'del', child: Text('حذف')),
+              ],
+            ),
           ),
         );
       }),
@@ -1302,7 +1369,7 @@ class Panels {
           'username=${Uri.encodeQueryComponent(user)}&password=${Uri.encodeQueryComponent(pass)}');
       final res = await req.close();
       final body = await utf8.decodeStream(res);
-      if (!body.contains('"success":true')) {
+      if (!RegExp(r'"success"\s*:\s*true').hasMatch(body)) {
         throw Exception('بيانات الدخول غير صحيحة أو اللوحة ما استجابت');
       }
       return res.cookies;
@@ -1323,6 +1390,37 @@ class _PanelPageState extends State<PanelPage> {
   late final WebViewController c;
   bool loading = true;
   String? note;
+  int fills = 0;
+
+  Future<void> fillLogin() async {
+    if (fills >= 2) return;
+    final u = jsonEncode('${widget.panel['user']}');
+    final p = jsonEncode('${widget.panel['pass']}');
+    final js = '''
+(function(u,p){
+  var pw=document.querySelector('input[type=password]');
+  if(!pw) return 'nologin';
+  var us=document.querySelector('input[name=username]')||document.querySelector('input[type=text]')||document.querySelector('input:not([type])');
+  if(!us) return 'nouser';
+  var set=function(el,v){
+    var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+    d.call(el,v);
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    el.dispatchEvent(new Event('change',{bubbles:true}));
+  };
+  set(us,u); set(pw,p);
+  setTimeout(function(){
+    var b=document.querySelector('button[type=submit]')||document.querySelector('button.ant-btn-primary')||document.querySelector('button');
+    if(b) b.click();
+  },400);
+  return 'filled';
+})($u,$p)
+''';
+    try {
+      final r = await c.runJavaScriptReturningResult(js);
+      if ('$r'.contains('filled')) fills++;
+    } catch (_) {}
+  }
 
   @override
   void initState() {
@@ -1332,6 +1430,7 @@ class _PanelPageState extends State<PanelPage> {
       ..setNavigationDelegate(NavigationDelegate(
         onPageFinished: (_) {
           if (mounted) setState(() => loading = false);
+          fillLogin();
         },
         onSslAuthError: (r) => r.proceed(),
       ));
