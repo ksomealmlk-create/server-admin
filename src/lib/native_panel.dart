@@ -192,13 +192,21 @@ class _NativePanelPageState extends State<NativePanelPage>
   Future<void> loadClients() async {
     setState(() => loadingCli = true);
     try {
-      final m = await api
-          .get('panel/api/clients/list/paged?page=1&size=500&sort=email&order=asc');
-      final obj = m['obj'];
-      final items = obj is Map ? (obj['items'] as List?) : (obj as List?);
-      final list = (items ?? [])
-          .map((e) => Map<String, dynamic>.from(e as Map))
-          .toList();
+      final list = <Map<String, dynamic>>[];
+      var page = 1;
+      while (page <= 25) {
+        final m = await api.get(
+            'panel/api/clients/list/paged?page=$page&pageSize=200&sort=email');
+        final obj = m['obj'];
+        final items = obj is Map ? (obj['items'] as List?) : (obj as List?);
+        final got = (items ?? [])
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+        list.addAll(got);
+        final filtered = obj is Map ? _n(obj['filtered']).toInt() : list.length;
+        if (got.isEmpty || list.length >= filtered) break;
+        page++;
+      }
       Set<String> on = {};
       try {
         final o = await api.post('panel/api/clients/onlines');
@@ -236,9 +244,9 @@ class _NativePanelPageState extends State<NativePanelPage>
 
   Future<void> toggle(String email, bool v) async {
     try {
-      final cur = await fetchClient(email);
-      cur['enable'] = v;
-      await api.post('panel/api/clients/update/${Uri.encodeComponent(email)}', cur);
+      await api.post(
+          v ? 'panel/api/clients/bulkEnable' : 'panel/api/clients/bulkDisable',
+          {'emails': [email]});
       await loadClients();
     } catch (e) {
       if (mounted) _snack(context, _err(e));
@@ -448,9 +456,13 @@ class _NativePanelPageState extends State<NativePanelPage>
               ? 0
               : DateTime.now().add(Duration(days: d)).millisecondsSinceEpoch,
           'limitIp': int.tryParse(ips.text.trim()) ?? 0,
-          'tgId': '',
+          'tgId': 0,
           'comment': '',
           'reset': 0,
+          'resetDay': 0,
+          'resetMax': 0,
+          'resetWeekday': 0,
+          'security': 'auto',
         },
       });
       await loadClients();
