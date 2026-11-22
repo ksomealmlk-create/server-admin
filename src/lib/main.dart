@@ -34,14 +34,6 @@ class App extends StatelessWidget {
 // ---------------------------------------------------------------- AWS EC2
 const kRegions = {
   'eu-north-1': 'ستوكهولم',
-  'eu-central-1': 'فرانكفورت',
-  'eu-west-1': 'أيرلندا',
-  'eu-west-2': 'لندن',
-  'eu-west-3': 'باريس',
-  'us-east-1': 'فرجينيا',
-  'us-east-2': 'أوهايو',
-  'ap-south-1': 'مومباي',
-  'ap-southeast-1': 'سنغافورة',
 };
 
 class AWS {
