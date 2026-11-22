@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'fx.dart';
 
 // ------------------------------------------------------------ helpers
 final _rng = Random.secure();
@@ -522,7 +523,7 @@ class _NativePanelPageState extends State<NativePanelPage>
     }
   }
 
-  Future<void> addClient() async {
+  Future<void> addClient([dynamic preInbound]) async {
     if (inbounds.isEmpty) {
       _snack(context, 'ما كو واردات. أنشئ وارداً من اللوحة الأصلية أولاً');
       return;
@@ -531,7 +532,7 @@ class _NativePanelPageState extends State<NativePanelPage>
     final gb = TextEditingController(text: '0');
     final days = TextEditingController(text: '0');
     final ips = TextEditingController(text: '0');
-    dynamic inb = inbounds.first['id'];
+    dynamic inb = preInbound ?? inbounds.first['id'];
     final ok = await showDialog<bool>(
         context: context,
         builder: (x) => StatefulBuilder(
@@ -619,7 +620,13 @@ class _NativePanelPageState extends State<NativePanelPage>
   }
 
   // ---- quick inbound: الاسم + اسم البرنامج بالعربي فقط، والباقي تلقائي
+  // بورتات الأولوية (الأكثر نجاحاً) بالترتيب، وبعدها عشوائي
+  static const _prefPorts = [443, 8443, 2053, 2083, 2087, 2096, 8080, 8880];
+
   int _freePort(Set<int> used) {
+    for (final p in _prefPorts) {
+      if (!used.contains(p)) return p;
+    }
     for (var i = 0; i < 1000; i++) {
       final p = 20000 + _rng.nextInt(40000);
       if (!used.contains(p)) return p;
@@ -715,7 +722,7 @@ class _NativePanelPageState extends State<NativePanelPage>
     final remark = '$label - ${preset.name}';
     try {
       await loadInbounds();
-      final used = <int>{22, 80, 443};
+      final used = <int>{22, 80};
       for (final i in inbounds) {
         used.add(_n(i['port']).toInt());
       }
@@ -857,19 +864,19 @@ class _NativePanelPageState extends State<NativePanelPage>
   // ---- UI
   Widget errBox(String? e, VoidCallback retry) => e == null
       ? const SizedBox.shrink()
-      : Card(
+      : FxCard(
           color: const Color(0x33FF5252),
           child: ListTile(
               title: Text(e),
               trailing: IconButton(onPressed: retry, icon: const Icon(Icons.refresh))));
 
-  Widget statCard(String t, String v, [String? sub]) => Card(
+  Widget statCard(String t, String v, [String? sub]) => FxCard(
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(t, style: const TextStyle(color: Colors.grey)),
             const SizedBox(height: 4),
-            Text(v,
+            FxGradText(v,
                 textDirection: TextDirection.ltr,
                 style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
             if (sub != null)
@@ -900,9 +907,9 @@ class _NativePanelPageState extends State<NativePanelPage>
       onRefresh: loadStatus,
       child: ListView(padding: const EdgeInsets.all(12), children: [
         errBox(statusErr, loadStatus),
-        Card(
+        FxCard(
           child: ListTile(
-            leading: Icon(Icons.circle, color: running ? Colors.greenAccent : Colors.redAccent, size: 14),
+            leading: FxDot(color: running ? Colors.greenAccent : Colors.redAccent, size: 14),
             title: Text('Xray ${running ? 'شغّال' : '${xray['state'] ?? 'غير معروف'}'}'),
             subtitle: Text('${xray['version'] ?? ''}'),
             trailing: FilledButton.tonal(onPressed: restartXray, child: const Text('إعادة تشغيل')),
@@ -942,6 +949,158 @@ class _NativePanelPageState extends State<NativePanelPage>
     );
   }
 
+  // عملاء وارد معيّن
+  List<Map<String, dynamic>> _clientsOf(Map i) {
+    final id = '${i['id']}';
+    final emails = <String>{};
+    try {
+      final st = i['settings'];
+      final m = st is String ? jsonDecode(st) : st;
+      for (final c in ((m is Map ? m['clients'] : null) as List? ?? [])) {
+        if (c is Map && c['email'] != null) emails.add('${c['email']}');
+      }
+    } catch (_) {}
+    for (final c in (i['clientStats'] as List? ?? [])) {
+      if (c is Map && c['email'] != null) emails.add('${c['email']}');
+    }
+    return clients.where((c) {
+      final ids = c['inboundIds'];
+      if (ids is List && ids.any((e) => '$e' == id)) return true;
+      if (c['inboundId'] != null && '${c['inboundId']}' == id) return true;
+      return emails.contains('${c['email']}');
+    }).toList();
+  }
+
+  // حذف وارد (مع خيار حذف عملائه اللي ما عندهم وارد ثاني)
+  Future<bool> delInbound(Map i) async {
+    final list = _clientsOf(i);
+    final only = list.where((c) {
+      final ids = c['inboundIds'];
+      return ids is! List || ids.length <= 1;
+    }).toList();
+    bool withClients = true;
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (x) => StatefulBuilder(
+              builder: (x, setS) => AlertDialog(
+                title: const Text('حذف الوارد'),
+                content: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Text('تريد تحذف "${i['remark'] ?? i['id']}" (بورت ${i['port']}) ؟ ما يرجع.'),
+                  if (only.isNotEmpty)
+                    CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        value: withClients,
+                        onChanged: (v) => setS(() => withClients = v ?? true),
+                        title: Text('حذف عملائه أيضاً (${only.length})')),
+                ]),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(x, false),
+                      child: const Text('إلغاء')),
+                  TextButton(
+                      onPressed: () => Navigator.pop(x, true),
+                      child: const Text('حذف',
+                          style: TextStyle(color: Colors.redAccent))),
+                ],
+              ),
+            ));
+    if (ok != true) return false;
+    try {
+      if (withClients) {
+        for (final c in only) {
+          try {
+            await api.post(
+                'panel/api/clients/del/${Uri.encodeComponent('${c['email']}')}');
+          } catch (_) {}
+        }
+      }
+      await api.post('panel/api/inbounds/del/${i['id']}');
+      await loadInbounds();
+      await loadClients();
+      if (mounted) _snack(context, 'تم حذف الوارد');
+      return true;
+    } catch (e) {
+      if (mounted) _snack(context, _err(e));
+      return false;
+    }
+  }
+
+  Future<void> showInboundClients(Map i) async {
+    final title =
+        '${i['remark'] == null || '${i['remark']}'.isEmpty ? 'وارد ${i['id']}' : i['remark']}';
+    await loadClients();
+    if (!mounted) return;
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (x) => StatefulBuilder(
+        builder: (x, setS) {
+          final list = _clientsOf(i);
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints:
+                  BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                  child: Row(children: [
+                    Expanded(
+                        child: Text('$title  (${list.length})',
+                            style: const TextStyle(
+                                fontSize: 17, fontWeight: FontWeight.bold))),
+                    IconButton(
+                        tooltip: 'حذف الوارد',
+                        icon: const Icon(Icons.delete_forever, color: Colors.redAccent),
+                        onPressed: () async {
+                          if (await delInbound(i) && x.mounted) Navigator.pop(x);
+                        }),
+                    FilledButton.icon(
+                        onPressed: () async {
+                          await addClient(i['id']);
+                          setS(() {});
+                        },
+                        icon: const Icon(Icons.person_add, size: 18),
+                        label: const Text('عميل')),
+                  ]),
+                ),
+                if (list.isEmpty)
+                  const Padding(
+                      padding: EdgeInsets.all(24), child: Text('ما كو عملاء بهذا الوارد')),
+                Flexible(
+                  child: ListView(shrinkWrap: true, children: list.map((c) {
+                    final email = '${c['email']}';
+                    final tr = (c['traffic'] as Map?) ?? {};
+                    final used = _n(tr['up']) + _n(tr['down']);
+                    final total = _n(c['totalGB']);
+                    final on = onlines.contains(email);
+                    return ListTile(
+                      leading: FxDot(color: on ? Colors.greenAccent : Colors.grey, size: 12),
+                      title: Text(email, textDirection: TextDirection.ltr),
+                      subtitle: Text(
+                          '${_bytes(used)}${total > 0 ? ' / ${_bytes(total)}' : ' / بلا حد'}  •  ${_expiry(_n(c['expiryTime']))}'),
+                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                        IconButton(
+                            icon: const Icon(Icons.qr_code),
+                            onPressed: () => showLinks(email)),
+                        IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.redAccent),
+                            onPressed: () async {
+                              await delClient(email);
+                              setS(() {});
+                            }),
+                      ]),
+                    );
+                  }).toList()),
+                ),
+                const SizedBox(height: 8),
+              ]),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget inboundsTab() {
     return RefreshIndicator(
       onRefresh: loadInbounds,
@@ -951,12 +1110,14 @@ class _NativePanelPageState extends State<NativePanelPage>
           const Padding(padding: EdgeInsets.all(24), child: Center(child: Text('ما كو واردات'))),
         ...inbounds.map((i) {
           final up = _n(i['up']), down = _n(i['down']), total = _n(i['total']);
-          return Card(
+          return FxCard(
             child: ListTile(
-              leading: Icon(Icons.circle, size: 14, color: i['enable'] == false ? Colors.grey : Colors.greenAccent),
+              leading: FxDot(color: i['enable'] == false ? Colors.grey : Colors.greenAccent, size: 14),
               title: Text('${i['remark'] == null || '${i['remark']}'.isEmpty ? 'وارد ${i['id']}' : i['remark']}'),
-              subtitle: Text('${i['protocol']} : ${i['port']}\n↑ ${_bytes(up)}   ↓ ${_bytes(down)}${total > 0 ? '   /  ${_bytes(total)}' : ''}'),
+              subtitle: Text('${i['protocol']} : ${i['port']}   👥 ${_clientsOf(i).length}\n↑ ${_bytes(up)}   ↓ ${_bytes(down)}${total > 0 ? '   /  ${_bytes(total)}' : ''}'),
               isThreeLine: true,
+              trailing: const Icon(Icons.chevron_left),
+              onTap: () => showInboundClients(i),
             ),
           );
         }),
@@ -994,12 +1155,12 @@ class _NativePanelPageState extends State<NativePanelPage>
               final total = _n(c['totalGB']);
               final en = c['enable'] != false;
               final on = onlines.contains(email);
-              return Card(
+              return FxCard(
                 child: Padding(
                   padding: const EdgeInsets.all(12),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
-                      Icon(Icons.circle, size: 12, color: on ? Colors.greenAccent : Colors.grey),
+                      FxDot(color: on ? Colors.greenAccent : Colors.grey, size: 12),
                       const SizedBox(width: 8),
                       Expanded(child: Text(email, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
                       Switch(value: en, onChanged: (v) => toggle(email, v)),
@@ -1034,7 +1195,7 @@ class _NativePanelPageState extends State<NativePanelPage>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
+      appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, scrolledUnderElevation: 0, centerTitle: true, 
         title: Text('${widget.panel['name']}'),
         actions: [
           IconButton(
@@ -1042,7 +1203,7 @@ class _NativePanelPageState extends State<NativePanelPage>
               onPressed: widget.openWeb,
               icon: const Icon(Icons.open_in_browser)),
         ],
-        bottom: TabBar(controller: tabs, tabs: const [
+        bottom: FxTabBar(controller: tabs, tabs: const [
           Tab(text: 'الحالة'),
           Tab(text: 'الواردات'),
           Tab(text: 'العملاء'),
@@ -1050,17 +1211,19 @@ class _NativePanelPageState extends State<NativePanelPage>
       ),
       floatingActionButton: AnimatedBuilder(
         animation: tabs,
-        builder: (_, __) => tabs.index == 2
-            ? FloatingActionButton.extended(
-                onPressed: addClient,
-                icon: const Icon(Icons.person_add),
-                label: const Text('عميل جديد'))
-            : tabs.index == 1
+        builder: (_, __) => fxFabSwitch(
+            tabs.index,
+            tabs.index == 2
                 ? FloatingActionButton.extended(
-                    onPressed: quickInbound,
-                    icon: const Icon(Icons.bolt),
-                    label: const Text('إدخال سريع'))
-                : const SizedBox.shrink(),
+                    onPressed: addClient,
+                    icon: const Icon(Icons.person_add),
+                    label: const Text('عميل جديد'))
+                : tabs.index == 1
+                    ? FloatingActionButton.extended(
+                        onPressed: quickInbound,
+                        icon: const Icon(Icons.bolt),
+                        label: const Text('إدخال سريع'))
+                    : null),
       ),
       body: SafeArea(
         child: TabBarView(controller: tabs, children: [

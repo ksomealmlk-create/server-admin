@@ -12,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:xml/xml.dart' as xml;
 import 'native_panel.dart';
+import 'fx.dart';
 
 void main() => runApp(const App());
 
@@ -22,11 +23,44 @@ class App extends StatelessWidget {
         title: 'إدارة السيرفرات',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
-            brightness: Brightness.dark,
-            useMaterial3: true,
-            colorSchemeSeed: Colors.blue),
-        builder: (ctx, child) =>
-            Directionality(textDirection: TextDirection.rtl, child: child!),
+          brightness: Brightness.dark,
+          useMaterial3: true,
+          colorScheme: ColorScheme.fromSeed(
+                  seedColor: const Color(0xFF6C5CE7),
+                  brightness: Brightness.dark)
+              .copyWith(surfaceContainerHigh: const Color(0xFF1A1D3A)),
+          scaffoldBackgroundColor: Colors.transparent,
+          pageTransitionsTheme: const PageTransitionsTheme(builders: {
+            TargetPlatform.android: FxTransitions(),
+            TargetPlatform.iOS: FxTransitions(),
+          }),
+          bottomSheetTheme: const BottomSheetThemeData(
+            backgroundColor: Color(0xF2121430),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+          ),
+          snackBarTheme: SnackBarThemeData(
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: const Color(0xFF23264A),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          ),
+          floatingActionButtonTheme: FloatingActionButtonThemeData(
+            elevation: 10,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          ),
+          filledButtonTheme: FilledButtonThemeData(
+            style: FilledButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14))),
+          ),
+        ),
+        builder: (ctx, child) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: Stack(fit: StackFit.expand, children: [
+            const FxBackground(),
+            child!,
+          ]),
+        ),
         home: const Home(),
       );
 }
@@ -865,7 +899,7 @@ class _HomeState extends State<Home> {
     final stColor = st == 'error'
         ? Colors.redAccent
         : (active && st != 'creating' ? Colors.greenAccent : Colors.orangeAccent);
-    return Card(
+    return FxCard(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1092,7 +1126,7 @@ class _HomeState extends State<Home> {
                     textAlign: TextAlign.center))),
       ...Store.panels.asMap().entries.map((e) {
         final pn = e.value;
-        return Card(
+        return FxCard(
           child: ListTile(
             leading: const Icon(Icons.dashboard),
             title: Text('${pn['name']}'),
@@ -1135,7 +1169,7 @@ class _HomeState extends State<Home> {
       child: ListView(padding: const EdgeInsets.all(12), children: [
         if (loading) const LinearProgressIndicator(),
         if (err != null)
-          Card(
+          FxCard(
               child: Padding(
                   padding: const EdgeInsets.all(12),
                   child:
@@ -1196,7 +1230,7 @@ class _HomeState extends State<Home> {
       settingsTab(),
     ];
     return Scaffold(
-      appBar: AppBar(
+      appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, scrolledUnderElevation: 0, centerTitle: true, 
         title: const Text('إدارة السيرفرات'),
         actions: [
           IconButton(onPressed: refresh, icon: const Icon(Icons.refresh)),
@@ -1301,13 +1335,13 @@ class _ClientsPageState extends State<ClientsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('${s['ip']}')),
+      appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, scrolledUnderElevation: 0, centerTitle: true, title: Text('${s['ip']}')),
       body: SafeArea(
         child: ListView(padding: const EdgeInsets.all(12), children: [
           if (busy) const LinearProgressIndicator(),
           ...clients.map((c) {
             final l = Xray.link(s, Map<String, dynamic>.from(c as Map));
-            return Card(
+            return FxCard(
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -1638,7 +1672,7 @@ class _PanelPageState extends State<PanelPage> {
         }
       },
       child: Scaffold(
-        appBar: AppBar(
+        appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, scrolledUnderElevation: 0, centerTitle: true, 
           title: Text('${widget.panel['name']}'),
           actions: [
             IconButton(onPressed: () => c.reload(), icon: const Icon(Icons.refresh)),
