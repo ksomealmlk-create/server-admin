@@ -81,8 +81,33 @@ class AWS {
       b.map((e) => e.toRadixString(16).padLeft(2, '0')).join();
 
   // EC2 Query API with Signature V4
+  // أخطاء فشل الاتصال قبل إرسال الطلب (آمن إعادة المحاولة، ما يكرر إنشاء سيرفر)
+  static bool _connectFail(Object e) {
+    final s = e.toString();
+    return s.contains('No route to host') ||
+        s.contains('Network is unreachable') ||
+        s.contains('Failed host lookup') ||
+        s.contains('Connection refused') ||
+        s.contains('Connection timed out');
+  }
+
   static Future<xml.XmlDocument> call(String region, String action,
       [Map<String, String> params = const {}]) async {
+    Object? last;
+    for (var a = 0; a < 5; a++) {
+      try {
+        return await _callOnce(region, action, params);
+      } catch (e) {
+        if (!_connectFail(e)) rethrow;
+        last = e;
+        await Future.delayed(Duration(milliseconds: 1000 * (a + 1)));
+      }
+    }
+    throw last!;
+  }
+
+  static Future<xml.XmlDocument> _callOnce(String region, String action,
+      Map<String, String> params) async {
     final host = 'ec2.$region.amazonaws.com';
     final p = <String, String>{
       'Action': action,
@@ -144,6 +169,11 @@ class AWS {
     }
     if (s.contains('UnauthorizedOperation') || s.contains('AccessDenied')) {
       return 'مستخدم IAM ما عنده صلاحية كافية (أعطه AmazonEC2FullAccess)\n$s';
+    }
+    if (_connectFail(e)) {
+      return 'ما كدرت أوصل لسيرفرات AWS من شبكتك (No route to host).\n'
+          'جرّب: بدّل بين الواي فاي والبيانات، أو طفّي/شغّل الـVPN، أو غيّر DNS '
+          'للجهاز (مثلاً 1.1.1.1)، وبعدها أعد المحاولة.';
     }
     return s;
   }

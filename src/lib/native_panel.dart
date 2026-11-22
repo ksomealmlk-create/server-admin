@@ -282,6 +282,7 @@ class _NativePanelPageState extends State<NativePanelPage>
   String? inbErr;
   List<Map<String, dynamic>> clients = [];
   Set<String> onlines = {};
+  final ValueNotifier<int> _ver = ValueNotifier(0);
   String? cliErr;
   bool loadingCli = false;
   String filter = '';
@@ -306,6 +307,7 @@ class _NativePanelPageState extends State<NativePanelPage>
   @override
   void dispose() {
     timer?.cancel();
+    _ver.dispose();
     tabs.dispose();
     super.dispose();
   }
@@ -331,6 +333,7 @@ class _NativePanelPageState extends State<NativePanelPage>
         inbounds = (m['obj'] as List?) ?? [];
         inbErr = null;
       });
+      _ver.value++;
     } catch (e) {
       if (mounted) setState(() => inbErr = _err(e));
     }
@@ -368,7 +371,10 @@ class _NativePanelPageState extends State<NativePanelPage>
     } catch (e) {
       if (mounted) setState(() => cliErr = _err(e));
     }
-    if (mounted) setState(() => loadingCli = false);
+    if (mounted) {
+      setState(() => loadingCli = false);
+      _ver.value++;
+    }
   }
 
   // ---- actions
@@ -1025,80 +1031,73 @@ class _NativePanelPageState extends State<NativePanelPage>
     }
   }
 
-  Future<void> showInboundClients(Map i) async {
-    final title =
-        '${i['remark'] == null || '${i['remark']}'.isEmpty ? 'وارد ${i['id']}' : i['remark']}';
+  // شاشة كاملة لعملاء وارد معيّن
+  Future<void> showInboundClients(Map i0) async {
     await loadClients();
     if (!mounted) return;
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (x) => StatefulBuilder(
-        builder: (x, setS) {
+    final id = i0['id'];
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (rc) => ValueListenableBuilder<int>(
+        valueListenable: _ver,
+        builder: (rc, _, __) {
+          final Map i =
+              inbounds.firstWhere((x) => x['id'] == id, orElse: () => i0) as Map;
+          final title =
+              '${i['remark'] == null || '${i['remark']}'.isEmpty ? 'وارد ${i['id']}' : i['remark']}';
           final list = _clientsOf(i);
-          return SafeArea(
-            child: ConstrainedBox(
-              constraints:
-                  BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-                  child: Row(children: [
-                    Expanded(
-                        child: Text('$title  (${list.length})',
-                            style: const TextStyle(
-                                fontSize: 17, fontWeight: FontWeight.bold))),
-                    IconButton(
-                        tooltip: 'حذف الوارد',
-                        icon: const Icon(Icons.delete_forever, color: Colors.redAccent),
-                        onPressed: () async {
-                          if (await delInbound(i) && x.mounted) Navigator.pop(x);
-                        }),
-                    FilledButton.icon(
-                        onPressed: () async {
-                          await addClient(i['id']);
-                          setS(() {});
-                        },
-                        icon: const Icon(Icons.person_add, size: 18),
-                        label: const Text('عميل')),
-                  ]),
-                ),
-                if (list.isEmpty)
-                  const Padding(
-                      padding: EdgeInsets.all(24), child: Text('ما كو عملاء بهذا الوارد')),
-                Flexible(
-                  child: ListView(shrinkWrap: true, children: list.map((c) {
-                    final email = '${c['email']}';
-                    final tr = (c['traffic'] as Map?) ?? {};
-                    final used = _n(tr['up']) + _n(tr['down']);
-                    final total = _n(c['totalGB']);
-                    final on = onlines.contains(email);
-                    return ListTile(
-                      leading: FxDot(color: on ? Colors.greenAccent : Colors.grey, size: 12),
-                      title: Text(email, textDirection: TextDirection.ltr),
-                      subtitle: Text(
-                          '${_bytes(used)}${total > 0 ? ' / ${_bytes(total)}' : ' / بلا حد'}  •  ${_expiry(_n(c['expiryTime']))}'),
-                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                        IconButton(
-                            icon: const Icon(Icons.qr_code),
-                            onPressed: () => showLinks(email)),
-                        IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.redAccent),
-                            onPressed: () async {
-                              await delClient(email);
-                              setS(() {});
-                            }),
-                      ]),
-                    );
-                  }).toList()),
-                ),
-                const SizedBox(height: 8),
-              ]),
+          return Scaffold(
+            appBar: AppBar(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              scrolledUnderElevation: 0,
+              centerTitle: true,
+              title: Text(title),
+              actions: [
+                IconButton(
+                    tooltip: 'حذف الوارد',
+                    icon: const Icon(Icons.delete_forever, color: Colors.redAccent),
+                    onPressed: () async {
+                      if (await delInbound(i) && rc.mounted) Navigator.pop(rc);
+                    }),
+              ],
+            ),
+            floatingActionButton: FloatingActionButton.extended(
+                onPressed: () => addClient(id),
+                icon: const Icon(Icons.person_add),
+                label: const Text('عميل جديد')),
+            body: SafeArea(
+              child: RefreshIndicator(
+                onRefresh: loadClients,
+                child: ListView(
+                    padding: const EdgeInsets.fromLTRB(12, 4, 12, 90),
+                    children: [
+                      FxCard(
+                        child: ListTile(
+                          leading: FxDot(
+                              color: i['enable'] == false
+                                  ? Colors.grey
+                                  : Colors.greenAccent,
+                              size: 14),
+                          title: Text('${i['protocol']} : ${i['port']}',
+                              textDirection: TextDirection.ltr),
+                          subtitle: Text(
+                              '👥 ${list.length}   ↑ ${_bytes(_n(i['up']))}   ↓ ${_bytes(_n(i['down']))}'),
+                        ),
+                      ),
+                      errBox(cliErr, loadClients),
+                      if (loadingCli) const LinearProgressIndicator(),
+                      if (cliErr == null && !loadingCli && list.isEmpty)
+                        const Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Center(child: Text('ما كو عملاء بهذا الوارد'))),
+                      ...list.map(clientCard),
+                    ]),
+              ),
             ),
           );
         },
       ),
-    );
+    ));
   }
 
   Widget inboundsTab() {
@@ -1125,30 +1124,7 @@ class _NativePanelPageState extends State<NativePanelPage>
     );
   }
 
-  Widget clientsTab() {
-    final list = clients
-        .where((c) => '${c['email']}'.toLowerCase().contains(filter.toLowerCase()))
-        .toList();
-    return Column(children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-        child: TextField(
-          decoration: const InputDecoration(
-              prefixIcon: Icon(Icons.search),
-              hintText: 'بحث بالاسم',
-              border: OutlineInputBorder()),
-          onChanged: (v) => setState(() => filter = v),
-        ),
-      ),
-      if (loadingCli) const LinearProgressIndicator(),
-      Expanded(
-        child: RefreshIndicator(
-          onRefresh: loadClients,
-          child: ListView(padding: const EdgeInsets.all(12), children: [
-            errBox(cliErr, loadClients),
-            if (cliErr == null && !loadingCli && list.isEmpty)
-              const Padding(padding: EdgeInsets.all(24), child: Center(child: Text('ما كو عملاء'))),
-            ...list.map((c) {
+  Widget clientCard(Map<String, dynamic> c) {
               final email = '${c['email']}';
               final tr = (c['traffic'] as Map?) ?? {};
               final used = _n(tr['up']) + _n(tr['down']);
@@ -1185,7 +1161,32 @@ class _NativePanelPageState extends State<NativePanelPage>
                   ]),
                 ),
               );
-            }),
+  }
+
+  Widget clientsTab() {
+    final list = clients
+        .where((c) => '${c['email']}'.toLowerCase().contains(filter.toLowerCase()))
+        .toList();
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+        child: TextField(
+          decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.search),
+              hintText: 'بحث بالاسم',
+              border: OutlineInputBorder()),
+          onChanged: (v) => setState(() => filter = v),
+        ),
+      ),
+      if (loadingCli) const LinearProgressIndicator(),
+      Expanded(
+        child: RefreshIndicator(
+          onRefresh: loadClients,
+          child: ListView(padding: const EdgeInsets.all(12), children: [
+            errBox(cliErr, loadClients),
+            if (cliErr == null && !loadingCli && list.isEmpty)
+              const Padding(padding: EdgeInsets.all(24), child: Center(child: Text('ما كو عملاء'))),
+            ...list.map(clientCard),
           ]),
         ),
       ),
