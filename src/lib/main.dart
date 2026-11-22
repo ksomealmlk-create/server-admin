@@ -1030,7 +1030,8 @@ class _HomeState extends State<Home> {
 
   void openPanel(Map pn) {
     final tok = '${pn['token'] ?? ''}'.trim();
-    if (tok.isEmpty) {
+    final us = '${pn['user'] ?? ''}'.trim();
+    if (tok.isEmpty && us.isEmpty) {
       openWeb(pn);
       return;
     }
@@ -1042,6 +1043,8 @@ class _HomeState extends State<Home> {
                     'name': '${pn['name']}',
                     'url': Panels.norm('${pn['url']}'),
                     'token': tok,
+                    'user': us,
+                    'pass': '${pn['pass'] ?? ''}',
                   },
                   openWeb: () => openWeb(pn),
                 )));
@@ -1094,7 +1097,7 @@ class _HomeState extends State<Home> {
             leading: const Icon(Icons.dashboard),
             title: Text('${pn['name']}'),
             subtitle: Text(
-                '${'${pn['token'] ?? ''}'.isNotEmpty ? 'تحكم سريع ✓  ' : ''}${pn['url']}',
+                '${('${pn['token'] ?? ''}'.isNotEmpty || '${pn['user'] ?? ''}'.isNotEmpty) ? 'تحكم سريع ✓  ' : ''}${pn['url']}',
                 textDirection: TextDirection.ltr,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis),

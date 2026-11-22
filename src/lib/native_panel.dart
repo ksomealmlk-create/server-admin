@@ -70,20 +70,72 @@ Future<bool> _confirm(BuildContext c, String t) async =>
     false;
 
 // ------------------------------------------------------------ API
+class _AuthFail implements Exception {
+  final String msg;
+  _AuthFail(this.msg);
+  @override
+  String toString() => msg;
+}
+
 class XApi {
   final String base; // ends with '/'
   final String token;
-  XApi(this.base, this.token);
+  final String user;
+  final String pass;
+  String _cookie = '';
+  XApi(this.base, this.token, {this.user = '', this.pass = ''});
+
+  // no API token -> log in with username/password and use the session cookie
+  bool get _useLogin => token.isEmpty && user.isNotEmpty;
+
+  Future<void> _login() async {
+    final c = HttpClient();
+    c.connectionTimeout = const Duration(seconds: 12);
+    c.badCertificateCallback = (cert, host, port) => true;
+    try {
+      final req = await c.postUrl(Uri.parse('${base}login'));
+      req.followRedirects = false;
+      req.headers.contentType = ContentType.json;
+      req.add(utf8.encode(jsonEncode({'username': user, 'password': pass})));
+      final res = await req.close().timeout(const Duration(seconds: 30));
+      final txt = await utf8.decodeStream(res);
+      if (!RegExp(r'"success"\s*:\s*true').hasMatch(txt)) {
+        throw Exception('بيانات الدخول غير صحيحة أو اللوحة ما استجابت');
+      }
+      _cookie = res.cookies.map((k) => '${k.name}=${k.value}').join('; ');
+    } finally {
+      c.close(force: true);
+    }
+  }
 
   Future<Map<String, dynamic>> _req(String method, String path,
       {Object? body}) async {
+    if (_useLogin && _cookie.isEmpty) await _login();
+    try {
+      return await _do(method, path, body);
+    } on _AuthFail catch (e) {
+      if (!_useLogin) throw Exception(e.msg);
+      await _login();
+      try {
+        return await _do(method, path, body);
+      } on _AuthFail catch (e2) {
+        throw Exception(e2.msg);
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> _do(String method, String path, Object? body) async {
     final c = HttpClient();
     c.connectionTimeout = const Duration(seconds: 12);
     c.badCertificateCallback = (cert, host, port) => true;
     try {
       final req = await c.openUrl(method, Uri.parse('$base$path'));
       req.followRedirects = false;
-      req.headers.set('Authorization', 'Bearer $token');
+      if (_useLogin) {
+        req.headers.set('Cookie', _cookie);
+      } else {
+        req.headers.set('Authorization', 'Bearer $token');
+      }
       req.headers.set('Accept', 'application/json');
       if (body != null) {
         req.headers.contentType = ContentType.json;
@@ -92,14 +144,15 @@ class XApi {
       final res = await req.close().timeout(const Duration(seconds: 30));
       final txt = await utf8.decodeStream(res);
       if (res.statusCode >= 300 && res.statusCode < 400) {
-        throw Exception(
-            'اللوحة رفضت التوكن وحوّلتني لصفحة الدخول. أنشئ توكن جديد بصلاحية «مسؤول» والصقه من جديد');
+        throw _AuthFail(_useLogin
+            ? 'اللوحة رفضت جلسة الدخول، تأكد من اليوزر والباسورد'
+            : 'اللوحة رفضت التوكن وحوّلتني لصفحة الدخول. أنشئ توكن جديد بصلاحية «مسؤول» والصقه من جديد');
       }
       if (res.statusCode == 401 ||
           res.statusCode == 403 ||
           res.statusCode == 404) {
-        throw Exception(
-            'تعذر الوصول (${res.statusCode}): تأكد من التوكن ومن رابط اللوحة');
+        throw _AuthFail(
+            'تعذر الوصول (${res.statusCode}): تأكد من بيانات الدخول ومن رابط اللوحة');
       }
       dynamic j;
       try {
@@ -107,7 +160,7 @@ class XApi {
       } catch (_) {
         final looksHtml = txt.trimLeft().toLowerCase().startsWith('<');
         throw Exception(looksHtml
-            ? 'اللوحة رجّعت صفحة ويب بدل بيانات: التوكن غير مقبول أو الرابط ناقصه المسار العشوائي'
+            ? 'اللوحة رجّعت صفحة ويب بدل بيانات: بيانات الدخول غير مقبولة أو الرابط ناقصه المسار العشوائي'
             : 'رد غير متوقع من اللوحة (HTTP ${res.statusCode})');
       }
       if (j is! Map) throw Exception('رد غير متوقع من اللوحة');
@@ -154,7 +207,9 @@ class _NativePanelPageState extends State<NativePanelPage>
     super.initState();
     var b = '${widget.panel['url']}'.trim();
     if (!b.endsWith('/')) b += '/';
-    api = XApi(b, '${widget.panel['token']}');
+    api = XApi(b, '${widget.panel['token'] ?? ''}',
+        user: '${widget.panel['user'] ?? ''}',
+        pass: '${widget.panel['pass'] ?? ''}');
     tabs = TabController(length: 3, vsync: this);
     loadStatus();
     loadInbounds();
