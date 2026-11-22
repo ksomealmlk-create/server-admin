@@ -853,7 +853,9 @@ class _HomeState extends State<Home> {
     final local = Store.servers['$id'];
     final st = local?['status'] as String?;
     final ready = st == 'ready';
-    final port = ready ? (local!['xray']['port'] as int) : 22;
+    final xr = local?['xray'];
+    final port = (ready && xr is Map) ? (xr['port'] as int) : 22;
+    final cl = (local?['clients'] as List?) ?? const [];
     final logs = List<String>.from((local?['log'] as List?) ?? []);
     final stText = st == 'creating'
         ? 'جاري التجهيز'
@@ -875,7 +877,7 @@ class _HomeState extends State<Home> {
             Text(stText, style: TextStyle(color: stColor)),
           ]),
           Text('${d['region']['slug']}  •  ${d['size_slug']}'
-              '${ready ? '  •  ${(local!['clients'] as List).length} مستخدم' : ''}'),
+              '${ready && cl.isNotEmpty ? '  •  ${cl.length} مستخدم' : ''}'),
           const SizedBox(height: 6),
           SelectableText(ip,
               textDirection: TextDirection.ltr,
@@ -898,7 +900,7 @@ class _HomeState extends State<Home> {
             ),
           const SizedBox(height: 8),
           Wrap(spacing: 8, runSpacing: 4, children: [
-            if (ready && (local!['clients'] as List).isNotEmpty)
+            if (ready && cl.isNotEmpty && xr is Map)
               FilledButton(
                   onPressed: () async {
                     await Navigator.push(
@@ -1139,7 +1141,7 @@ class _HomeState extends State<Home> {
           const Padding(
               padding: EdgeInsets.all(24),
               child: Center(child: Text('لا يوجد سيرفرات'))),
-        ...droplets.map(card),
+        ...droplets.map((d) => Builder(builder: (_) => card(d))),
       ]),
     );
   }
