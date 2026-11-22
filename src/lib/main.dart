@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:xml/xml.dart' as xml;
 import 'native_panel.dart';
 
 void main() => runApp(const App());
@@ -29,35 +31,220 @@ class App extends StatelessWidget {
       );
 }
 
-// ---------------------------------------------------------------- DigitalOcean
-class DO {
-  static String token = '';
-  static const base = 'https://api.digitalocean.com/v2';
-  static Map<String, String> get h => {
-        'Authorization': 'Bearer $token',
-        'Content-Type': 'application/json'
-      };
-  static Future<Map<String, dynamic>> req(String m, String p,
-      [Map<String, dynamic>? body]) async {
-    final u = Uri.parse(base + p);
-    http.Response r;
-    if (m == 'GET') {
-      r = await http.get(u, headers: h);
-    } else if (m == 'POST') {
-      r = await http.post(u, headers: h, body: jsonEncode(body ?? {}));
-    } else {
-      r = await http.delete(u, headers: h);
-    }
-    final dynamic j = r.body.isEmpty ? <String, dynamic>{} : jsonDecode(r.body);
+// ---------------------------------------------------------------- AWS EC2
+const kRegions = {
+  'eu-north-1': 'ستوكهولم',
+  'eu-central-1': 'فرانكفورت',
+  'eu-west-1': 'أيرلندا',
+  'eu-west-2': 'لندن',
+  'eu-west-3': 'باريس',
+  'us-east-1': 'فرجينيا',
+  'us-east-2': 'أوهايو',
+  'ap-south-1': 'مومباي',
+  'ap-southeast-1': 'سنغافورة',
+};
+
+class AWS {
+  static String ak = '';
+  static String sk = '';
+  static bool get ready => ak.isNotEmpty && sk.isNotEmpty;
+
+  static List<int> _hmac(List<int> key, String data) =>
+      Hmac(sha256, key).convert(utf8.encode(data)).bytes;
+  static String _hex(List<int> b) =>
+      b.map((e) => e.toRadixString(16).padLeft(2, '0')).join();
+
+  // EC2 Query API with Signature V4
+  static Future<xml.XmlDocument> call(String region, String action,
+      [Map<String, String> params = const {}]) async {
+    final host = 'ec2.$region.amazonaws.com';
+    final p = <String, String>{
+      'Action': action,
+      'Version': '2016-11-15',
+      ...params
+    };
+    final keys = p.keys.toList()..sort();
+    final body = keys
+        .map((k) => '${Uri.encodeComponent(k)}=${Uri.encodeComponent(p[k]!)}')
+        .join('&');
+    final now = DateTime.now().toUtc();
+    String two(int n) => n.toString().padLeft(2, '0');
+    final date = '${now.year}${two(now.month)}${two(now.day)}';
+    final amz = '${date}T${two(now.hour)}${two(now.minute)}${two(now.second)}Z';
+    final scope = '$date/$region/ec2/aws4_request';
+    final canonical = 'POST\n/\n\nhost:$host\nx-amz-date:$amz\n\n'
+        'host;x-amz-date\n${_hex(sha256.convert(utf8.encode(body)).bytes)}';
+    final toSign = 'AWS4-HMAC-SHA256\n$amz\n$scope\n'
+        '${_hex(sha256.convert(utf8.encode(canonical)).bytes)}';
+    var k = _hmac(utf8.encode('AWS4$sk'), date);
+    k = _hmac(k, region);
+    k = _hmac(k, 'ec2');
+    k = _hmac(k, 'aws4_request');
+    final sig = _hex(_hmac(k, toSign));
+    final r = await http
+        .post(Uri.https(host, '/'),
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+              'X-Amz-Date': amz,
+              'Authorization':
+                  'AWS4-HMAC-SHA256 Credential=$ak/$scope, SignedHeaders=host;x-amz-date, Signature=$sig',
+            },
+            body: body)
+        .timeout(const Duration(seconds: 40));
+    xml.XmlDocument? parsed;
+    try {
+      parsed = xml.XmlDocument.parse(r.body);
+    } catch (_) {}
+    if (parsed == null) throw Exception('HTTP ${r.statusCode}');
+    final doc = parsed;
     if (r.statusCode >= 400) {
-      throw Exception(j is Map
-          ? (j['message'] ?? 'HTTP ${r.statusCode}')
-          : 'HTTP ${r.statusCode}');
+      String? t(String n) {
+        final l = doc.findAllElements(n);
+        return l.isEmpty ? null : l.first.innerText;
+      }
+
+      throw Exception(
+          '${t('Code') ?? 'HTTP ${r.statusCode}'}: ${t('Message') ?? ''}');
     }
-    return Map<String, dynamic>.from(j as Map);
+    return doc;
   }
 
-  static String msg(Object e) => e.toString().replaceFirst('Exception: ', '');
+  static String msg(Object e) {
+    final s = e.toString().replaceFirst('Exception: ', '');
+    if (s.contains('AuthFailure') ||
+        s.contains('InvalidClientTokenId') ||
+        s.contains('SignatureDoesNotMatch')) {
+      return 'مفاتيح AWS غير صحيحة أو المنطقة غير مفعّلة بحسابك\n$s';
+    }
+    if (s.contains('UnauthorizedOperation') || s.contains('AccessDenied')) {
+      return 'مستخدم IAM ما عنده صلاحية كافية (أعطه AmazonEC2FullAccess)\n$s';
+    }
+    return s;
+  }
+
+  static Map<String, dynamic> _inst(xml.XmlElement i, String region) {
+    String? t(xml.XmlElement e, String n) => e.getElement(n)?.innerText;
+    var name = '';
+    final tags = i.getElement('tagSet');
+    if (tags != null) {
+      for (final x in tags.childElements) {
+        if (t(x, 'key') == 'Name') name = t(x, 'value') ?? '';
+      }
+    }
+    final id = t(i, 'instanceId') ?? '';
+    final state = i.getElement('instanceState')?.getElement('name')?.innerText ?? '';
+    final ip = t(i, 'ipAddress');
+    return {
+      'id': id,
+      'name': name.isEmpty ? id : name,
+      'region': {'slug': region},
+      'size_slug': t(i, 'instanceType') ?? '',
+      'status': state == 'running' ? 'active' : state,
+      'ip': (ip == null || ip.isEmpty) ? 'pending' : ip,
+    };
+  }
+
+  static Future<List<Map<String, dynamic>>> list(String region,
+      {String? id}) async {
+    final p = <String, String>{};
+    if (id != null) {
+      p['InstanceId.1'] = id;
+    } else {
+      p['Filter.1.Name'] = 'instance-state-name';
+      const st = ['pending', 'running', 'stopping', 'stopped'];
+      for (var i = 0; i < st.length; i++) {
+        p['Filter.1.Value.${i + 1}'] = st[i];
+      }
+    }
+    final d = await call(region, 'DescribeInstances', p);
+    return d
+        .findAllElements('instancesSet')
+        .expand((s) => s.childElements)
+        .map((i) => _inst(i, region))
+        .toList();
+  }
+
+  static Future<String> ubuntuAmi(String region) async {
+    final d = await call(region, 'DescribeImages', {
+      'Owner.1': '099720109477',
+      'Filter.1.Name': 'name',
+      'Filter.1.Value.1':
+          'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*',
+      'Filter.2.Name': 'state',
+      'Filter.2.Value.1': 'available',
+      'Filter.3.Name': 'architecture',
+      'Filter.3.Value.1': 'x86_64',
+    });
+    var best = '';
+    var bestDate = '';
+    for (final i
+        in d.findAllElements('imagesSet').expand((s) => s.childElements)) {
+      final id = i.getElement('imageId')?.innerText ?? '';
+      final dt = i.getElement('creationDate')?.innerText ?? '';
+      if (id.isNotEmpty && dt.compareTo(bestDate) > 0) {
+        best = id;
+        bestDate = dt;
+      }
+    }
+    if (best.isEmpty) throw Exception('ما لقيت صورة Ubuntu 24.04 بهالمنطقة');
+    return best;
+  }
+
+  // Security group that opens all inbound ports (like a DigitalOcean droplet)
+  static Future<String> openGroup(String region) async {
+    final d = await call(region, 'DescribeSecurityGroups', {
+      'Filter.1.Name': 'group-name',
+      'Filter.1.Value.1': 'serveradmin-open',
+    });
+    for (final g in d
+        .findAllElements('securityGroupInfo')
+        .expand((s) => s.childElements)) {
+      final id = g.getElement('groupId')?.innerText;
+      if (id != null && id.isNotEmpty) return id;
+    }
+    final c = await call(region, 'CreateSecurityGroup', {
+      'GroupName': 'serveradmin-open',
+      'GroupDescription': 'ServerAdmin open ports',
+    });
+    final gid = c.findAllElements('groupId').first.innerText;
+    await call(region, 'AuthorizeSecurityGroupIngress', {
+      'GroupId': gid,
+      'IpPermissions.1.IpProtocol': '-1',
+      'IpPermissions.1.IpRanges.1.CidrIp': '0.0.0.0/0',
+    });
+    return gid;
+  }
+
+  static Future<String> launch(
+      String region, String type, String name, String userData) async {
+    final ami = await ubuntuAmi(region);
+    final sg = await openGroup(region);
+    final d = await call(region, 'RunInstances', {
+      'ImageId': ami,
+      'InstanceType': type,
+      'MinCount': '1',
+      'MaxCount': '1',
+      'SecurityGroupId.1': sg,
+      'UserData': base64Encode(utf8.encode(userData)),
+      'BlockDeviceMapping.1.DeviceName': '/dev/sda1',
+      'BlockDeviceMapping.1.Ebs.VolumeSize': '20',
+      'BlockDeviceMapping.1.Ebs.VolumeType': 'gp3',
+      'BlockDeviceMapping.1.Ebs.DeleteOnTermination': 'true',
+      'CreditSpecification.CpuCredits': 'standard',
+      'TagSpecification.1.ResourceType': 'instance',
+      'TagSpecification.1.Tag.1.Key': 'Name',
+      'TagSpecification.1.Tag.1.Value': name,
+    });
+    return d.findAllElements('instanceId').first.innerText;
+  }
+
+  static Future<void> terminate(String region, String id) async {
+    await call(region, 'TerminateInstances', {'InstanceId.1': id});
+  }
+
+  static Future<void> reboot(String region, String id) async {
+    await call(region, 'RebootInstances', {'InstanceId.1': id});
+  }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -98,13 +285,6 @@ Future<bool> confirm(BuildContext c, String t) async =>
                   child: const Text('تأكيد')),
             ])) ??
     false;
-
-String ipOf(dynamic d) {
-  for (final n in (d['networks']['v4'] as List)) {
-    if (n['type'] == 'public') return n['ip_address'] as String;
-  }
-  return 'pending';
-}
 
 final _rnd = Random.secure();
 String randHex(int bytes) => List.generate(
@@ -303,6 +483,8 @@ class Prov {
   }
 
   static String cloudInit(String pass) => '''#cloud-config
+disable_root: false
+ssh_pwauth: true
 runcmd:
   - echo 'root:$pass' | chpasswd
   - printf 'PasswordAuthentication yes\\nPermitRootLogin yes\\n' > /etc/ssh/sshd_config.d/00-panel.conf
@@ -456,9 +638,14 @@ sleep 12
         log(s, 'انتظار تشغيل السيرفر...');
         for (var i = 0; i < 60 && s['ip'] == null; i++) {
           await Future.delayed(const Duration(seconds: 5));
-          final d = (await DO.req('GET', '/droplets/$id'))['droplet'];
-          final ip = ipOf(d);
-          if (d['status'] == 'active' && ip != 'pending') s['ip'] = ip;
+          try {
+            final l = await AWS.list(s['region'] as String, id: id);
+            if (l.isNotEmpty &&
+                l.first['status'] == 'active' &&
+                l.first['ip'] != 'pending') {
+              s['ip'] = l.first['ip'];
+            }
+          } catch (_) {}
         }
         if (s['ip'] == null) throw Exception('انتهت مهلة انتظار الـ IP');
         await Store.save();
@@ -512,7 +699,7 @@ sleep 12
     } catch (e) {
       s['status'] = 'error';
       s.remove('xray');
-      log(s, 'خطأ: ${DO.msg(e)}');
+      log(s, 'خطأ: ${AWS.msg(e)}');
     } finally {
       running.remove(id);
       await Store.save();
@@ -532,11 +719,10 @@ class _HomeState extends State<Home> {
   int tab = 0;
   bool loading = false;
   String? err;
-  String balance = '';
-  List<dynamic> droplets = [];
-  List<int> keys = [];
-  Map<int, String> pings = {};
-  final tokenCtl = TextEditingController();
+  List<Map<String, dynamic>> droplets = [];
+  Map<String, String> pings = {};
+  final akCtl = TextEditingController();
+  final skCtl = TextEditingController();
 
   void _onTick() {
     if (mounted) setState(() {});
@@ -557,62 +743,79 @@ class _HomeState extends State<Home> {
 
   Future<void> init() async {
     final p = await SharedPreferences.getInstance();
-    DO.token = p.getString('token') ?? '';
+    AWS.ak = p.getString('aws_ak') ?? '';
+    AWS.sk = p.getString('aws_sk') ?? '';
     await Store.load();
     if (mounted) setState(() {});
-    if (DO.token.isNotEmpty) await refresh();
+    if (AWS.ready) await refresh();
   }
 
   Future<void> refresh() async {
-    if (DO.token.isEmpty) return;
+    if (!AWS.ready) return;
     setState(() {
       loading = true;
       err = null;
     });
     try {
-      final j = await DO.req('GET', '/droplets?per_page=200');
-      droplets = j['droplets'] as List;
-      final ids = droplets.map((d) => '${d['id']}').toSet();
-      Store.servers.removeWhere((k, v) => !ids.contains(k));
-      await Store.save();
-      for (final e in Store.servers.entries) {
+      final all = <Map<String, dynamic>>[];
+      final errs = <String>[];
+      await Future.wait(kRegions.keys.map((r) async {
+        try {
+          all.addAll(await AWS.list(r));
+        } catch (e) {
+          errs.add('$r: ${AWS.msg(e)}');
+        }
+      }));
+      all.sort((a, b) => '${a['region']['slug']}${a['name']}'
+          .compareTo('${b['region']['slug']}${b['name']}'));
+      droplets = all;
+      if (errs.isEmpty) {
+        final ids = droplets.map((d) => '${d['id']}').toSet();
+        Store.servers.removeWhere((k, v) => !ids.contains(k));
+        await Store.save();
+      } else {
+        err = errs.join('\n');
+      }
+      for (final e in Store.servers.entries.toList()) {
         if (e.value['status'] == 'creating') Prov.run(e.key);
       }
-      final k = await DO.req('GET', '/account/keys');
-      keys = (k['ssh_keys'] as List).map<int>((e) => e['id'] as int).toList();
-      try {
-        final b = await DO.req('GET', '/customers/my/balance');
-        balance = '\$${b['month_to_date_usage']}';
-      } catch (_) {}
     } catch (e) {
-      err = DO.msg(e);
+      err = AWS.msg(e);
     }
     if (mounted) setState(() => loading = false);
   }
 
-  Future<void> saveToken() async {
-    final v = tokenCtl.text.trim();
-    if (v.isEmpty) return;
+  Future<void> saveKeys() async {
+    final a = akCtl.text.trim();
+    final k = skCtl.text.trim();
+    if (a.isEmpty || k.isEmpty) {
+      snack(context, 'عبّي المفتاحين');
+      return;
+    }
     final p = await SharedPreferences.getInstance();
-    await p.setString('token', v);
-    DO.token = v;
-    tokenCtl.clear();
+    await p.setString('aws_ak', a);
+    await p.setString('aws_sk', k);
+    AWS.ak = a;
+    AWS.sk = k;
+    akCtl.clear();
+    skCtl.clear();
     setState(() => tab = 1);
     await refresh();
   }
 
-  Future<void> clearToken() async {
+  Future<void> clearKeys() async {
     final p = await SharedPreferences.getInstance();
-    await p.remove('token');
-    DO.token = '';
+    await p.remove('aws_ak');
+    await p.remove('aws_sk');
+    AWS.ak = '';
+    AWS.sk = '';
     setState(() {
       droplets = [];
-      balance = '';
     });
-    if (mounted) snack(context, 'تم مسح التوكن');
+    if (mounted) snack(context, 'تم مسح المفاتيح');
   }
 
-  Future<void> doPing(int id, String ip, int port) async {
+  Future<void> doPing(String id, String ip, int port) async {
     if (ip == 'pending') {
       snack(context, 'السيرفر لسه ما جاهز');
       return;
@@ -622,26 +825,26 @@ class _HomeState extends State<Home> {
     setState(() => pings[id] = r == null ? 'ما كو استجابة' : 'التأخير: $r ms');
   }
 
-  Future<void> del(int id, String name) async {
+  Future<void> del(String id, String name, String region) async {
     if (!await confirm(context, 'حذف السيرفر $name ؟')) return;
     try {
-      await DO.req('DELETE', '/droplets/$id');
-      Store.servers.remove('$id');
+      await AWS.terminate(region, id);
+      Store.servers.remove(id);
       await Store.save();
       if (mounted) snack(context, 'تم الحذف');
       await refresh();
     } catch (e) {
-      if (mounted) snack(context, DO.msg(e));
+      if (mounted) snack(context, AWS.msg(e));
     }
   }
 
-  Future<void> reboot(int id) async {
+  Future<void> reboot(String id, String region) async {
     if (!await confirm(context, 'إعادة تشغيل السيرفر؟')) return;
     try {
-      await DO.req('POST', '/droplets/$id/actions', {'type': 'reboot'});
+      await AWS.reboot(region, id);
       if (mounted) snack(context, 'تم إرسال الأمر');
     } catch (e) {
-      if (mounted) snack(context, DO.msg(e));
+      if (mounted) snack(context, AWS.msg(e));
     }
   }
 
@@ -651,8 +854,9 @@ class _HomeState extends State<Home> {
   }
 
   Widget card(dynamic d) {
-    final id = d['id'] as int;
-    final ip = ipOf(d);
+    final id = d['id'] as String;
+    final ip = d['ip'] as String;
+    final rg = d['region']['slug'] as String;
     final active = d['status'] == 'active';
     final local = Store.servers['$id'];
     final st = local?['status'] as String?;
@@ -750,10 +954,10 @@ class _HomeState extends State<Home> {
                   onPressed: () => copy('${local['pass']}'),
                   child: const Text('نسخ باسورد root')),
             OutlinedButton(
-                onPressed: () => reboot(id), child: const Text('إعادة تشغيل')),
+                onPressed: () => reboot(id, rg), child: const Text('إعادة تشغيل')),
             FilledButton.tonal(
                 style: FilledButton.styleFrom(foregroundColor: Colors.redAccent),
-                onPressed: () => del(id, '${d['name']}'),
+                onPressed: () => del(id, '${d['name']}', rg),
                 child: const Text('حذف')),
           ]),
         ]),
@@ -926,8 +1130,8 @@ class _HomeState extends State<Home> {
   }
 
   Widget serversTab() {
-    if (DO.token.isEmpty) {
-      return const Center(child: Text('أدخل التوكن من تبويب الإعدادات'));
+    if (!AWS.ready) {
+      return const Center(child: Text('أدخل مفاتيح AWS من تبويب الإعدادات'));
     }
     return RefreshIndicator(
       onRefresh: refresh,
@@ -949,27 +1153,37 @@ class _HomeState extends State<Home> {
   }
 
   Widget settingsTab() => ListView(padding: const EdgeInsets.all(16), children: [
-        const Text('توكن DigitalOcean',
+        const Text('مفاتيح AWS',
             style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
         TextField(
-            controller: tokenCtl,
+            controller: akCtl,
+            textDirection: TextDirection.ltr,
+            decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Access Key ID',
+                hintText: 'AKIA...')),
+        const SizedBox(height: 8),
+        TextField(
+            controller: skCtl,
             obscureText: true,
             textDirection: TextDirection.ltr,
             decoration: const InputDecoration(
-                border: OutlineInputBorder(), hintText: 'dop_v1_...')),
+                border: OutlineInputBorder(), labelText: 'Secret Access Key')),
         const SizedBox(height: 8),
         Row(children: [
-          FilledButton(onPressed: saveToken, child: const Text('حفظ')),
+          FilledButton(onPressed: saveKeys, child: const Text('حفظ')),
           const SizedBox(width: 8),
-          OutlinedButton(onPressed: clearToken, child: const Text('مسح التوكن')),
+          OutlinedButton(onPressed: clearKeys, child: const Text('مسح المفاتيح')),
         ]),
         const SizedBox(height: 12),
-        const Text(
-            'التوكن وباسوردات السيرفرات ومفاتيح Xray تُحفظ على جهازك فقط. لا ترسلها لأي أحد.',
-            style: TextStyle(color: Colors.grey)),
+        Text(AWS.ready ? 'المفاتيح محفوظة ✓' : 'ما كو مفاتيح محفوظة',
+            style: TextStyle(
+                color: AWS.ready ? Colors.greenAccent : Colors.orangeAccent)),
         const SizedBox(height: 12),
-        Text('مفاتيح SSH بالحساب: ${keys.length}'),
+        const Text(
+            'المفاتيح وباسوردات السيرفرات ومفاتيح Xray تُحفظ على جهازك فقط. لا ترسلها لأي أحد. استعمل مفاتيح مستخدم IAM بصلاحية AmazonEC2FullAccess فقط، مو مفاتيح الحساب الرئيسي.',
+            style: TextStyle(color: Colors.grey)),
       ]);
 
   @override
@@ -978,7 +1192,6 @@ class _HomeState extends State<Home> {
       panelsTab(),
       serversTab(),
       CreateTab(
-          keys: keys,
           onCreated: () async {
             await refresh();
             if (mounted) setState(() => tab = 1);
@@ -989,10 +1202,6 @@ class _HomeState extends State<Home> {
       appBar: AppBar(
         title: const Text('إدارة السيرفرات'),
         actions: [
-          if (balance.isNotEmpty)
-            Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Center(child: Text('هذا الشهر: $balance'))),
           IconButton(onPressed: refresh, icon: const Icon(Icons.refresh)),
         ],
       ),
@@ -1049,7 +1258,7 @@ class _ClientsPageState extends State<ClientsPage> {
       await Store.save();
       name.clear();
     } catch (e) {
-      if (mounted) snack(context, DO.msg(e));
+      if (mounted) snack(context, AWS.msg(e));
     }
     if (mounted) setState(() => busy = false);
   }
@@ -1067,7 +1276,7 @@ class _ClientsPageState extends State<ClientsPage> {
       s['clients'] = next;
       await Store.save();
     } catch (e) {
-      if (mounted) snack(context, DO.msg(e));
+      if (mounted) snack(context, AWS.msg(e));
     }
     if (mounted) setState(() => busy = false);
   }
@@ -1163,32 +1372,21 @@ class _ClientsPageState extends State<ClientsPage> {
 
 // ---------------------------------------------------------------- Create
 class CreateTab extends StatefulWidget {
-  final List<int> keys;
   final Future<void> Function() onCreated;
-  const CreateTab({super.key, required this.keys, required this.onCreated});
+  const CreateTab({super.key, required this.onCreated});
   @override
   State<CreateTab> createState() => _CreateTabState();
 }
 
 class _CreateTabState extends State<CreateTab> {
-  static const regions = {
-    'fra1': 'فرانكفورت',
-    'lon1': 'لندن',
-    'ams3': 'أمستردام',
-    'blr1': 'بنغالور',
-    'sgp1': 'سنغافورة',
-    'nyc1': 'نيويورك',
-    'tor1': 'تورنتو',
-    'syd1': 'سيدني',
-  };
+  static const regions = kRegions;
   static const sizes = {
-    's-1vcpu-512mb-10gb': '512MB - \$4',
-    's-1vcpu-1gb': '1GB - \$6',
-    's-1vcpu-2gb': '2GB - \$12',
+    't3.micro': '1GB (t3.micro) - ضمن الباقة المجانية',
+    't3.small': '2GB (t3.small) - يُخصم من الكريدت',
   };
 
-  String region = 'fra1';
-  String size = 's-1vcpu-512mb-10gb';
+  String region = 'eu-north-1';
+  String size = 't3.micro';
   String mode = '3xui';
   final name = TextEditingController();
   Map<String, int?> res = {};
@@ -1204,7 +1402,7 @@ class _CreateTabState extends State<CreateTab> {
     });
     final out = <String, int?>{};
     await Future.wait(regions.keys.map((r) async {
-      out[r] = await avgPing('speedtest-$r.digitalocean.com', 80);
+      out[r] = await avgPing('ec2.$r.amazonaws.com', 443);
     }));
     if (mounted) {
       setState(() {
@@ -1215,8 +1413,8 @@ class _CreateTabState extends State<CreateTab> {
   }
 
   Future<void> create() async {
-    if (DO.token.isEmpty) {
-      snack(context, 'أدخل التوكن أولًا');
+    if (!AWS.ready) {
+      snack(context, 'أدخل مفاتيح AWS أولًا');
       return;
     }
     final n = name.text.trim().isEmpty ? 'vpn-$region' : name.text.trim();
@@ -1233,16 +1431,7 @@ class _CreateTabState extends State<CreateTab> {
     });
     try {
       final pass = randPass(20);
-      final body = <String, dynamic>{
-        'name': n,
-        'region': region,
-        'size': size,
-        'image': 'ubuntu-24-04-x64',
-        'user_data': Prov.cloudInit(pass),
-      };
-      if (widget.keys.isNotEmpty) body['ssh_keys'] = widget.keys;
-      final j = await DO.req('POST', '/droplets', body);
-      final id = '${j['droplet']['id']}';
+      final id = await AWS.launch(region, size, n, Prov.cloudInit(pass));
       Store.servers[id] = {
         'name': n,
         'region': region,
@@ -1260,7 +1449,7 @@ class _CreateTabState extends State<CreateTab> {
       await widget.onCreated();
     } catch (e) {
       ok = false;
-      msg = DO.msg(e);
+      msg = AWS.msg(e);
     }
     if (mounted) setState(() => busy = false);
   }
@@ -1449,7 +1638,7 @@ class _PanelPageState extends State<PanelPage> {
             path: k.path ?? '/'));
       }
     } catch (e) {
-      note = DO.msg(e);
+      note = AWS.msg(e);
     }
     await c.loadRequest(Uri.parse('${base}panel/'));
     if (mounted) setState(() {});
