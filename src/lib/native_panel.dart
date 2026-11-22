@@ -194,6 +194,72 @@ class XApi {
       _req('POST', p, body: body ?? <String, dynamic>{});
 }
 
+// ------------------------------------------------------------ quick inbound presets
+// اسم البرنامج بالعربي -> الدومين اللي يُستخدم كـ Host/SNI.
+// عدّل أو زِد على هذي القائمة حسب اللي يشتغل عندك.
+class AppPreset {
+  final String name;
+  final List<String> aliases;
+  final String host; // serverName (SNI)
+  final String? target; // dest لـ Reality، الافتراضي host:443
+  const AppPreset(this.name, this.aliases, this.host, [this.target]);
+  String get dest => target ?? '$host:443';
+}
+
+const kPresets = <AppPreset>[
+  // بث
+  AppPreset('تيك توك', ['tiktok', 'تيكتوك', 'تك توك'], 'www.tiktok.com'),
+  AppPreset('يوتيوب', ['youtube', 'يوتوب'], 'www.youtube.com'),
+  AppPreset('OSN+', ['osn', 'اوسن', 'او اس ان'], 'www.osnplus.com'),
+  AppPreset('شاهد', ['shahid', 'mbc', 'شاهد نت'], 'shahid.mbc.net'),
+  // تواصل وترفيه
+  AppPreset('سناب شات', ['snapchat', 'سناب', 'سناب چات'], 'www.snapchat.com'),
+  AppPreset('واتساب', ['whatsapp', 'واتس', 'وتساب'], 'web.whatsapp.com'),
+  AppPreset('انستغرام', ['instagram', 'انستا', 'انستجرام'], 'www.instagram.com'),
+  AppPreset('تلكرام', ['telegram', 'تيليجرام', 'تلغرام', 'تيليغرام'], 'telegram.org', 'core.telegram.org:443'),
+  AppPreset('EA Sports', ['ea', 'اي ايه', 'ea sports'], 'www.ea.com'),
+  AppPreset('تويتر', ['twitter', 'اكس', 'x'], 'x.com'),
+  AppPreset('ويز', ['waze'], 'www.waze.com'),
+  AppPreset('بلي', ['bly'], ''), // الدومين غير معروف: اكتبه هنا
+  AppPreset('فيسبوك', ['facebook', 'فيس بوك', 'فيس', 'ماسنجر'], 'www.facebook.com'),
+  AppPreset('سبوتيفاي', ['spotify', 'سبوتفاي'], 'open.spotify.com'),
+  AppPreset('تعليم', ['education'], ''), // الدومين غير معروف: اكتبه هنا
+  AppPreset('انغامي', ['anghami', 'أنغامي'], 'www.anghami.com'),
+  AppPreset('ببجي', ['pubg', 'بوبجي'], 'www.pubgmobile.com'),
+  AppPreset('فايبر', ['viber', 'فايبير'], 'www.viber.com'),
+  AppPreset('Busuu', ['busuu', 'بوسو'], 'www.busuu.com'),
+];
+
+String _norm(String s) {
+  var t = s.toLowerCase().trim();
+  t = t.replaceAll(RegExp('[\u064B-\u065F\u0670\u0640]'), '');
+  t = t
+      .replaceAll(RegExp('[أإآ]'), 'ا')
+      .replaceAll('ة', 'ه')
+      .replaceAll('ى', 'ي')
+      .replaceAll('ؤ', 'و')
+      .replaceAll('ئ', 'ي');
+  return t.replaceAll(RegExp(r'\s+'), '');
+}
+
+AppPreset? findPreset(String q) {
+  final n = _norm(q);
+  if (n.isEmpty) return null;
+  for (final p in kPresets) {
+    for (final a in [p.name, ...p.aliases]) {
+      if (_norm(a) == n) return p;
+    }
+  }
+  if (n.length < 2) return null;
+  for (final p in kPresets) {
+    for (final a in [p.name, ...p.aliases]) {
+      final an = _norm(a);
+      if (an.length >= 2 && (n.contains(an) || an.contains(n))) return p;
+    }
+  }
+  return null;
+}
+
 // ------------------------------------------------------------ page
 class NativePanelPage extends StatefulWidget {
   final Map<String, dynamic> panel;
@@ -552,6 +618,242 @@ class _NativePanelPageState extends State<NativePanelPage>
     }
   }
 
+  // ---- quick inbound: الاسم + اسم البرنامج بالعربي فقط، والباقي تلقائي
+  int _freePort(Set<int> used) {
+    for (var i = 0; i < 1000; i++) {
+      final p = 20000 + _rng.nextInt(40000);
+      if (!used.contains(p)) return p;
+    }
+    throw Exception('ما لقيت بورت فارغ');
+  }
+
+  Future<Map> _tryBoth(String path) async {
+    try {
+      final m = await api.get(path);
+      if (m['obj'] is Map) return m['obj'] as Map;
+    } catch (_) {}
+    final m = await api.post(path);
+    return (m['obj'] as Map?) ?? {};
+  }
+
+  String _hex(int n) => List.generate(n, (_) => _rng.nextInt(16).toRadixString(16)).join();
+
+  Future<void> quickInbound() async {
+    final name = TextEditingController();
+    final app = TextEditingController();
+    bool withClient = true;
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (x) => StatefulBuilder(
+              builder: (x, setS) {
+                final pr = findPreset(app.text);
+                return AlertDialog(
+                  title: const Text('إدخال سريع'),
+                  content: SingleChildScrollView(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      TextField(
+                          controller: name,
+                          decoration: const InputDecoration(labelText: 'الاسم')),
+                      TextField(
+                          controller: app,
+                          onChanged: (_) => setS(() {}),
+                          decoration: const InputDecoration(
+                              labelText: 'اسم البرنامج بالعربي (مثل: واتساب)')),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: AlignmentDirectional.centerStart,
+                        child: Text(
+                            app.text.trim().isEmpty
+                                ? ''
+                                : pr == null
+                                    ? 'برنامج غير معروف'
+                                    : pr.host.isEmpty
+                                    ? '⚠ ${pr.name}: الدومين غير مضاف بالكود'
+                                    : '✓ ${pr.name}  →  ${pr.dest}',
+                            textDirection: TextDirection.ltr,
+                            style: TextStyle(
+                                color: pr == null || pr.host.isEmpty ? Colors.redAccent : Colors.greenAccent)),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                          spacing: 6,
+                          runSpacing: 0,
+                          children: kPresets
+                              .map((p) => ActionChip(
+                                  label: Text(p.name),
+                                  onPressed: () => setS(() => app.text = p.name)))
+                              .toList()),
+                      CheckboxListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: withClient,
+                          onChanged: (v) => setS(() => withClient = v ?? true),
+                          title: const Text('إنشاء عميل وعرض الرابط تلقائياً')),
+                    ]),
+                  ),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(x, false),
+                        child: const Text('إلغاء')),
+                    TextButton(
+                        onPressed: () => Navigator.pop(x, true),
+                        child: const Text('إنشاء')),
+                  ],
+                );
+              },
+            ));
+    if (ok != true) return;
+    final preset = findPreset(app.text);
+    if (preset == null) {
+      _snack(context, 'ما عرفت البرنامج، اختار من القائمة');
+      return;
+    }
+    if (preset.host.isEmpty) {
+      _snack(context, 'أضف دومين ${preset.name} بالقائمة kPresets أولاً');
+      return;
+    }
+    final label = name.text.trim().isEmpty ? preset.name : name.text.trim();
+    final remark = '$label - ${preset.name}';
+    try {
+      await loadInbounds();
+      final used = <int>{22, 80, 443};
+      for (final i in inbounds) {
+        used.add(_n(i['port']).toInt());
+      }
+      final pu = Uri.tryParse('${widget.panel['url']}');
+      if (pu != null && pu.hasPort) used.add(pu.port);
+
+      // مفاتيح Reality جديدة لكل وارد
+      final kp = await _tryBoth('panel/api/server/getNewX25519Cert');
+      final priv = '${kp['privateKey'] ?? ''}';
+      final pub = '${kp['publicKey'] ?? ''}';
+      if (priv.isEmpty || pub.isEmpty) throw Exception('فشل توليد مفاتيح Reality');
+      // تشفير VLESS (mlkem768x25519plus) ، إذا ما توفر نكمل بدون
+      var dec = 'none', enc = 'none';
+      try {
+        final ve = await _tryBoth('panel/api/server/getNewVlessEnc');
+        final auths = (ve['auths'] as List?) ?? [];
+        Map? pick;
+        for (final a in auths) {
+          if (a is Map && '${a['label']}'.contains('X25519')) {
+            pick ??= a;
+          }
+        }
+        pick ??= auths.isNotEmpty && auths.first is Map ? auths.first as Map : null;
+        if (pick != null &&
+            '${pick['decryption']}'.isNotEmpty &&
+            '${pick['encryption']}'.isNotEmpty) {
+          dec = '${pick['decryption']}';
+          enc = '${pick['encryption']}';
+        }
+      } catch (_) {}
+      final shortIds = [12, 6, 14, 10, 2, 4, 8, 16].map(_hex).toList();
+      final spider = '/${_rid(16)}';
+
+      dynamic id;
+      int port = 0;
+      Object? lastErr;
+      for (var attempt = 0; attempt < 4; attempt++) {
+        port = _freePort(used);
+        used.add(port);
+        try {
+          final m = await api.post('panel/api/inbounds/add', {
+            'up': 0,
+            'down': 0,
+            'total': 0,
+            'remark': remark,
+            'enable': true,
+            'expiryTime': 0,
+            'listen': '',
+            'port': port,
+            'protocol': 'vless',
+            'tag': 'in-$port-tcp',
+            'settings': jsonEncode({
+              'clients': [],
+              'decryption': dec,
+              'encryption': enc,
+              'testseed': [900, 500, 900, 256],
+            }),
+            'streamSettings': jsonEncode({
+              'network': 'tcp',
+              'tcpSettings': {
+                'acceptProxyProtocol': false,
+                'header': {'type': 'none'},
+              },
+              'security': 'reality',
+              'realitySettings': {
+                'show': false,
+                'xver': 0,
+                'target': preset.dest,
+                'serverNames': [preset.host],
+                'privateKey': priv,
+                'minClientVer': '',
+                'maxClientVer': '',
+                'maxTimediff': 0,
+                'shortIds': shortIds,
+                'mldsa65Seed': '',
+                'settings': {
+                  'publicKey': pub,
+                  'fingerprint': 'chrome',
+                  'serverName': '',
+                  'spiderX': spider,
+                  'mldsa65Verify': '',
+                },
+              },
+            }),
+            'sniffing': jsonEncode({
+              'enabled': true,
+              'destOverride': ['http', 'tls', 'quic', 'fakedns'],
+              'metadataOnly': false,
+              'routeOnly': false,
+            }),
+          });
+          final o = m['obj'];
+          id = o is Map ? o['id'] : null;
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      if (lastErr != null) throw lastErr;
+      await loadInbounds();
+      if (id == null) {
+        for (final i in inbounds) {
+          if (_n(i['port']).toInt() == port) id = i['id'];
+        }
+      }
+      if (!mounted) return;
+      _snack(context, 'تم إنشاء الوارد على البورت $port');
+      if (withClient && id != null) {
+        final email = 'u${_rid(8)}';
+        await api.post('panel/api/clients/add', {
+          'inboundIds': [id],
+          'client': {
+            'email': email,
+            'id': _uuid(),
+            'subId': _rid(16),
+            'flow': 'xtls-rprx-vision',
+            'enable': true,
+            'totalGB': 0,
+            'expiryTime': 0,
+            'limitIp': 0,
+            'tgId': 0,
+            'comment': label,
+            'reset': 0,
+            'resetDay': 0,
+            'resetMax': 0,
+            'resetWeekday': 0,
+            'security': 'auto',
+          },
+        });
+        await loadClients();
+        if (mounted) await showLinks(email);
+      }
+    } catch (e) {
+      if (mounted) _snack(context, _err(e));
+    }
+  }
+
   // ---- UI
   Widget errBox(String? e, VoidCallback retry) => e == null
       ? const SizedBox.shrink()
@@ -753,7 +1055,12 @@ class _NativePanelPageState extends State<NativePanelPage>
                 onPressed: addClient,
                 icon: const Icon(Icons.person_add),
                 label: const Text('عميل جديد'))
-            : const SizedBox.shrink(),
+            : tabs.index == 1
+                ? FloatingActionButton.extended(
+                    onPressed: quickInbound,
+                    icon: const Icon(Icons.bolt),
+                    label: const Text('إدخال سريع'))
+                : const SizedBox.shrink(),
       ),
       body: SafeArea(
         child: TabBarView(controller: tabs, children: [
