@@ -1124,6 +1124,142 @@ class _NativePanelPageState extends State<NativePanelPage>
     );
   }
 
+  // ---- أجهزة/عناوين العميل المتصلة (Xray ما يسجّل موديل الموبايل، فنعرض IP + الشبكة)
+  final Map<String, Map?> _ipCache = {};
+
+  Future<Map?> _ipInfo(String ip) async {
+    if (_ipCache.containsKey(ip)) return _ipCache[ip];
+    Map? res;
+    try {
+      final c = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+      final r = await (await c.getUrl(Uri.parse('https://ipwho.is/$ip')))
+          .close()
+          .timeout(const Duration(seconds: 8));
+      final body = await r.transform(utf8.decoder).join();
+      c.close();
+      final m = jsonDecode(body);
+      if (m is Map && m['success'] != false) res = m;
+    } catch (_) {}
+    _ipCache[ip] = res;
+    return res;
+  }
+
+  String _fmtTs(dynamic t) {
+    if (t == null) return '';
+    final n = num.tryParse('$t');
+    if (n == null) return '$t';
+    final ms = n > 100000000000 ? n.toInt() : (n * 1000).toInt();
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    String two(int x) => x.toString().padLeft(2, '0');
+    return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+  }
+
+  Future<List<Map<String, String>>> _clientDevices(String email) async {
+    final e = Uri.encodeComponent(email);
+    dynamic obj;
+    Object? lastErr;
+    var got = false;
+    final tries = <List<String>>[
+      ['post', 'panel/api/clients/ips/$e'],
+      ['post', 'panel/api/inbounds/clientIps/$e'],
+      ['get', 'panel/api/clients/ips/$e'],
+      ['get', 'panel/api/inbounds/clientIps/$e'],
+    ];
+    for (final t in tries) {
+      try {
+        final m = t[0] == 'post' ? await api.post(t[1]) : await api.get(t[1]);
+        obj = m['obj'];
+        got = true;
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!got) throw lastErr ?? Exception('تعذر جلب العناوين');
+    if (obj is String) {
+      final t = obj.trim();
+      if (t.startsWith('[') || t.startsWith('{')) {
+        try {
+          obj = jsonDecode(t);
+        } catch (_) {}
+      }
+    }
+    final raw = <Map<String, String>>[];
+    if (obj is List) {
+      for (final it in obj) {
+        if (it is Map) {
+          final ip = '${it['ip'] ?? ''}';
+          if (ip.isNotEmpty) {
+            raw.add({'ip': ip, 'time': _fmtTs(it['timestamp'] ?? it['time'])});
+          }
+        } else if (it is String) {
+          final m = RegExp(r'^\s*([0-9a-fA-F:.]+)\s*(?:\((.*)\))?\s*$').firstMatch(it);
+          if (m != null) raw.add({'ip': m.group(1)!, 'time': m.group(2) ?? ''});
+        }
+      }
+    }
+    final infos = await Future.wait(raw.map((r) => _ipInfo(r['ip']!)));
+    for (var i = 0; i < raw.length; i++) {
+      final m = infos[i];
+      if (m != null) {
+        final conn = m['connection'] is Map ? m['connection'] as Map : {};
+        raw[i]['isp'] = '${conn['isp'] ?? conn['org'] ?? ''}';
+        raw[i]['place'] =
+            [m['country'], m['city']].where((x) => x != null && '$x'.isNotEmpty).join('، ');
+      }
+    }
+    return raw;
+  }
+
+  Future<void> showClientDevices(String email) async {
+    final fut = _clientDevices(email);
+    await showDialog(
+        context: context,
+        builder: (x) => AlertDialog(
+              title: Text('أجهزة $email', textDirection: TextDirection.ltr),
+              content: SizedBox(
+                width: 340,
+                child: FutureBuilder<List<Map<String, String>>>(
+                  future: fut,
+                  builder: (_, snap) {
+                    if (snap.connectionState != ConnectionState.done) {
+                      return const SizedBox(
+                          height: 80,
+                          child: Center(child: CircularProgressIndicator()));
+                    }
+                    if (snap.hasError) return Text(_err(snap.error!));
+                    final list = snap.data ?? [];
+                    return SingleChildScrollView(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        if (list.isEmpty)
+                          const Text(
+                              'ما كو عناوين مسجلة. لازم access log يكون مفعّل بإعدادات Xray، والعميل يتصل مرة.'),
+                        ...list.map((d) => ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: const Icon(Icons.smartphone),
+                              title: Text(d['ip']!, textDirection: TextDirection.ltr),
+                              subtitle: Text([
+                                if ((d['isp'] ?? '').isNotEmpty) d['isp']!,
+                                if ((d['place'] ?? '').isNotEmpty) d['place']!,
+                                if ((d['time'] ?? '').isNotEmpty) d['time']!,
+                              ].join('\n')),
+                            )),
+                        const SizedBox(height: 8),
+                        const Text(
+                            'ملاحظة: موديل الموبايل ما ينرسل للسيرفر، فنعرض عنوان IP والشبكة (الشركة) والوقت.',
+                            style: TextStyle(fontSize: 12, color: Colors.grey)),
+                      ]),
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(x), child: const Text('إغلاق')),
+              ],
+            ));
+  }
+
   Widget clientCard(Map<String, dynamic> c) {
               final email = '${c['email']}';
               final tr = (c['traffic'] as Map?) ?? {};
@@ -1151,6 +1287,7 @@ class _NativePanelPageState extends State<NativePanelPage>
                     const SizedBox(height: 6),
                     Wrap(spacing: 6, runSpacing: 4, children: [
                       FilledButton(onPressed: () => showLinks(email), child: const Text('الرابط / QR')),
+                      OutlinedButton(onPressed: () => showClientDevices(email), child: const Text('الأجهزة')),
                       OutlinedButton(onPressed: () => editLimits(c), child: const Text('الحدود')),
                       OutlinedButton(onPressed: () => resetTraffic(email), child: const Text('تصفير')),
                       FilledButton.tonal(
