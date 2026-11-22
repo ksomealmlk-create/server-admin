@@ -1543,24 +1543,8 @@ class Panels {
     return s;
   }
 
-  static Future<List<Cookie>> login(String base, String user, String pass) async {
-    final c = HttpClient();
-    c.connectionTimeout = const Duration(seconds: 10);
-    c.badCertificateCallback = (cert, host, port) => true;
-    try {
-      final req = await c.postUrl(Uri.parse('${base}login'));
-      req.headers.contentType = ContentType.json;
-      req.add(utf8.encode(jsonEncode({'username': user, 'password': pass})));
-      final res = await req.close();
-      final body = await utf8.decodeStream(res);
-      if (!RegExp(r'"success"\s*:\s*true').hasMatch(body)) {
-        throw Exception('بيانات الدخول غير صحيحة أو اللوحة ما استجابت');
-      }
-      return res.cookies;
-    } finally {
-      c.close(force: true);
-    }
-  }
+  static Future<List<Cookie>> login(String base, String user, String pass) =>
+      xLogin(base, user, pass);
 }
 
 class PanelPage extends StatefulWidget {

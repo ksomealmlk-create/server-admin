@@ -70,6 +70,38 @@ Future<bool> _confirm(BuildContext c, String t) async =>
     false;
 
 // ------------------------------------------------------------ API
+// Log in to 3X-UI (form first, then JSON) and return the session cookies.
+Future<List<Cookie>> xLogin(String base, String user, String pass) async {
+  var last = '';
+  for (final asJson in [false, true]) {
+    final c = HttpClient();
+    c.connectionTimeout = const Duration(seconds: 12);
+    c.badCertificateCallback = (cert, host, port) => true;
+    try {
+      final req = await c.postUrl(Uri.parse('${base}login'));
+      req.followRedirects = false;
+      if (asJson) {
+        req.headers.contentType = ContentType.json;
+        req.add(utf8.encode(jsonEncode({'username': user, 'password': pass})));
+      } else {
+        req.headers.contentType =
+            ContentType('application', 'x-www-form-urlencoded', charset: 'utf-8');
+        req.add(utf8.encode(
+            'username=${Uri.encodeQueryComponent(user)}&password=${Uri.encodeQueryComponent(pass)}'));
+      }
+      final res = await req.close().timeout(const Duration(seconds: 30));
+      final txt = await utf8.decodeStream(res);
+      if (RegExp(r'"success"\s*:\s*true').hasMatch(txt)) return res.cookies;
+      last = 'HTTP ${res.statusCode}: ${txt.length > 120 ? txt.substring(0, 120) : txt}';
+    } catch (e) {
+      last = '$e';
+    } finally {
+      c.close(force: true);
+    }
+  }
+  throw Exception('فشل الدخول للوحة ($last)');
+}
+
 class _AuthFail implements Exception {
   final String msg;
   _AuthFail(this.msg);
@@ -89,23 +121,8 @@ class XApi {
   bool get _useLogin => token.isEmpty && user.isNotEmpty;
 
   Future<void> _login() async {
-    final c = HttpClient();
-    c.connectionTimeout = const Duration(seconds: 12);
-    c.badCertificateCallback = (cert, host, port) => true;
-    try {
-      final req = await c.postUrl(Uri.parse('${base}login'));
-      req.followRedirects = false;
-      req.headers.contentType = ContentType.json;
-      req.add(utf8.encode(jsonEncode({'username': user, 'password': pass})));
-      final res = await req.close().timeout(const Duration(seconds: 30));
-      final txt = await utf8.decodeStream(res);
-      if (!RegExp(r'"success"\s*:\s*true').hasMatch(txt)) {
-        throw Exception('بيانات الدخول غير صحيحة أو اللوحة ما استجابت');
-      }
-      _cookie = res.cookies.map((k) => '${k.name}=${k.value}').join('; ');
-    } finally {
-      c.close(force: true);
-    }
+    final ck = await xLogin(base, user, pass);
+    _cookie = ck.map((k) => '${k.name}=${k.value}').join('; ');
   }
 
   Future<Map<String, dynamic>> _req(String method, String path,
