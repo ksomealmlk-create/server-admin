@@ -1363,10 +1363,8 @@ class Panels {
     c.badCertificateCallback = (cert, host, port) => true;
     try {
       final req = await c.postUrl(Uri.parse('${base}login'));
-      req.headers.contentType =
-          ContentType('application', 'x-www-form-urlencoded', charset: 'utf-8');
-      req.write(
-          'username=${Uri.encodeQueryComponent(user)}&password=${Uri.encodeQueryComponent(pass)}');
+      req.headers.contentType = ContentType.json;
+      req.add(utf8.encode(jsonEncode({'username': user, 'password': pass})));
       final res = await req.close();
       final body = await utf8.decodeStream(res);
       if (!RegExp(r'"success"\s*:\s*true').hasMatch(body)) {

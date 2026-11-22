@@ -40,7 +40,7 @@ String _uptime(num s) {
   final d = s ~/ 86400;
   final h = (s % 86400) ~/ 3600;
   final m = (s % 3600) ~/ 60;
-  return d > 0 ? '$dي $hس' : '$hس $mد';
+  return d > 0 ? '${d}d ${h}h' : '${h}h ${m}m';
 }
 
 String _expiry(num ms) {
@@ -82,6 +82,7 @@ class XApi {
     c.badCertificateCallback = (cert, host, port) => true;
     try {
       final req = await c.openUrl(method, Uri.parse('$base$path'));
+      req.followRedirects = false;
       req.headers.set('Authorization', 'Bearer $token');
       req.headers.set('Accept', 'application/json');
       if (body != null) {
@@ -90,6 +91,10 @@ class XApi {
       }
       final res = await req.close().timeout(const Duration(seconds: 30));
       final txt = await utf8.decodeStream(res);
+      if (res.statusCode >= 300 && res.statusCode < 400) {
+        throw Exception(
+            'اللوحة رفضت التوكن وحوّلتني لصفحة الدخول. أنشئ توكن جديد بصلاحية «مسؤول» والصقه من جديد');
+      }
       if (res.statusCode == 401 ||
           res.statusCode == 403 ||
           res.statusCode == 404) {
@@ -100,7 +105,10 @@ class XApi {
       try {
         j = jsonDecode(txt);
       } catch (_) {
-        throw Exception('رد غير متوقع من اللوحة (HTTP ${res.statusCode})');
+        final looksHtml = txt.trimLeft().toLowerCase().startsWith('<');
+        throw Exception(looksHtml
+            ? 'اللوحة رجّعت صفحة ويب بدل بيانات: التوكن غير مقبول أو الرابط ناقصه المسار العشوائي'
+            : 'رد غير متوقع من اللوحة (HTTP ${res.statusCode})');
       }
       if (j is! Map) throw Exception('رد غير متوقع من اللوحة');
       final m = Map<String, dynamic>.from(j);
@@ -487,8 +495,13 @@ class _NativePanelPageState extends State<NativePanelPage>
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(t, style: const TextStyle(color: Colors.grey)),
             const SizedBox(height: 4),
-            Text(v, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-            if (sub != null) Text(sub, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            Text(v,
+                textDirection: TextDirection.ltr,
+                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            if (sub != null)
+              Text(sub,
+                  textDirection: TextDirection.ltr,
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
           ]),
         ),
       );
@@ -521,26 +534,36 @@ class _NativePanelPageState extends State<NativePanelPage>
             trailing: FilledButton.tonal(onPressed: restartXray, child: const Text('إعادة تشغيل')),
           ),
         ),
-        Row(children: [
+        IntrinsicHeight(
+          child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Expanded(child: statCard('المعالج', '${_n(s['cpu']).toStringAsFixed(1)}%')),
           Expanded(child: statCard('الذاكرة', '${memP.toStringAsFixed(1)}%', '${_bytes(_n(mem['current']))} / ${_bytes(_n(mem['total']))}')),
-        ]),
-        Row(children: [
+          ]),
+        ),
+        IntrinsicHeight(
+          child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Expanded(child: statCard('التخزين', '${diskP.toStringAsFixed(1)}%', '${_bytes(_n(disk['current']))} / ${_bytes(_n(disk['total']))}')),
           Expanded(child: statCard('مدة التشغيل', _uptime(_n(s['uptime'])))),
-        ]),
-        Row(children: [
+          ]),
+        ),
+        IntrinsicHeight(
+          child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Expanded(child: statCard('السرعة الآن', '↑ ${_bytes(_n(netIO['up']))}/s', '↓ ${_bytes(_n(netIO['down']))}/s')),
           Expanded(child: statCard('الإجمالي', '↑ ${_bytes(_n(netT['sent']))}', '↓ ${_bytes(_n(netT['recv']))}')),
-        ]),
-        Row(children: [
+          ]),
+        ),
+        IntrinsicHeight(
+          child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Expanded(child: statCard('اتصالات TCP', '${_n(s['tcpCount'])}')),
           Expanded(child: statCard('اتصالات UDP', '${_n(s['udpCount'])}')),
-        ]),
-        Row(children: [
+          ]),
+        ),
+        IntrinsicHeight(
+          child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Expanded(child: statCard('العملاء المتصلون', '${onlines.length}')),
           Expanded(child: statCard('عدد العملاء', '${clients.length}')),
-        ]),
+          ]),
+        ),
       ]),
     );
   }
